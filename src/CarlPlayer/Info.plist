@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_CN</string>
+  <key>CFBundleDisplayName</key>
+  <string>CarlPlayer</string>
+  <key>CFBundleExecutable</key>
+  <string>CarlPlayer</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.carl.local.CarlPlayer</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>CarlPlayer</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Video</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mp4</string>
+        <string>mkv</string>
+        <string>mov</string>
+        <string>ts</string>
+      </array>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+  </array>
+</dict>
+</plist>
