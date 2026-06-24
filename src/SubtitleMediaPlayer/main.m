@@ -4,8 +4,7 @@
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
 
-static const double SMPVolumeBoostMultiplier = 3.0;
-static const double SMPMaxUISliderVolume = 100.0;
+static const double SMPMaxVolume = 125.0;
 
 static BOOL SMPIsVideoURL(NSURL *url) {
     if (!url.isFileURL) { return NO; }
@@ -199,15 +198,6 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 @implementation AppDelegate
 
-- (double)mpvVolumeForSliderValue:(double)value {
-    double sliderValue = MIN(MAX(value, 0.0), SMPMaxUISliderVolume);
-    return sliderValue * SMPVolumeBoostMultiplier;
-}
-
-- (double)sliderValueForMPVVolume:(double)value {
-    return MIN(MAX(value / SMPVolumeBoostMultiplier, 0.0), SMPMaxUISliderVolume);
-}
-
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.defaults = [NSUserDefaults standardUserDefaults];
@@ -394,9 +384,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
     self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     self.volumeSlider.minValue = 0;
-    self.volumeSlider.maxValue = SMPMaxUISliderVolume;
-    self.volumeSlider.doubleValue = MIN(MAX([self.defaults doubleForKey:@"volume"], 0.0), SMPMaxUISliderVolume);
-    self.volumeSlider.toolTip = @"音量：拉满为 300% 软件增益";
+    self.volumeSlider.maxValue = SMPMaxVolume;
+    self.volumeSlider.doubleValue = MIN(MAX([self.defaults doubleForKey:@"volume"], 0.0), SMPMaxVolume);
+    self.volumeSlider.toolTip = @"音量：VLC 风格最高 125%";
     self.volumeSlider.target = self;
     self.volumeSlider.action = @selector(volumeChanged:);
     self.volumeSlider.continuous = YES;
@@ -496,14 +486,14 @@ static void SMPMPVRenderUpdate(void *ctx) {
     mpv_set_option_string(self.mpv, "keep-open", "yes");
     mpv_set_option_string(self.mpv, "hwdec", "auto-safe");
     mpv_set_option_string(self.mpv, "vo", "libmpv");
-    mpv_set_option_string(self.mpv, "volume-max", "300");
+    mpv_set_option_string(self.mpv, "volume-max", "125");
 
     if (mpv_initialize(self.mpv) < 0) {
         self.statusLabel.stringValue = @"mpv 初始化失败";
         return;
     }
 
-    double volume = [self mpvVolumeForSliderValue:self.volumeSlider.doubleValue];
+    double volume = self.volumeSlider.doubleValue;
     double speed = [self.defaults doubleForKey:@"speed"];
     int subVisible = self.subtitleVisible ? 1 : 0;
     mpv_set_property(self.mpv, "volume", MPV_FORMAT_DOUBLE, &volume);
@@ -606,9 +596,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
         self.progressSlider.maxValue = MAX(value, 1.0);
         [self refreshTimeUI];
     } else if ([name isEqualToString:@"volume"]) {
-        double sliderValue = [self sliderValueForMPVVolume:value];
-        if (fabs(self.volumeSlider.doubleValue - sliderValue) > 0.5) {
-            self.volumeSlider.doubleValue = sliderValue;
+        double clampedValue = MIN(MAX(value, 0.0), SMPMaxVolume);
+        if (fabs(self.volumeSlider.doubleValue - clampedValue) > 0.5) {
+            self.volumeSlider.doubleValue = clampedValue;
         }
     } else if ([name isEqualToString:@"speed"]) {
         [self selectSpeed:value];
@@ -869,7 +859,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 }
 
 - (void)applyVolumeFromSliderValue:(double)value {
-    [self setDoubleProperty:"volume" value:[self mpvVolumeForSliderValue:value]];
+    [self setDoubleProperty:"volume" value:MIN(MAX(value, 0.0), SMPMaxVolume)];
 }
 
 - (void)speedChanged:(id)sender {
