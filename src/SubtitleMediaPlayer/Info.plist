@@ -6,15 +6,15 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>zh_CN</string>
   <key>CFBundleDisplayName</key>
-  <string>CarlPlayer</string>
+  <string>SubtitleMediaPlayer</string>
   <key>CFBundleExecutable</key>
-  <string>CarlPlayer</string>
+  <string>SubtitleMediaPlayer</string>
   <key>CFBundleIdentifier</key>
-  <string>com.carl.local.CarlPlayer</string>
+  <string>com.carl.local.SubtitleMediaPlayer</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>CarlPlayer</string>
+  <string>SubtitleMediaPlayer</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -26,15 +26,15 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSDesktopFolderUsageDescription</key>
-  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <string>SubtitleMediaPlayer 需要读取你选择的视频和同目录字幕文件。</string>
   <key>NSDocumentsFolderUsageDescription</key>
-  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <string>SubtitleMediaPlayer 需要读取你选择的视频和同目录字幕文件。</string>
   <key>NSDownloadsFolderUsageDescription</key>
-  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <string>SubtitleMediaPlayer 需要读取你选择的视频和同目录字幕文件。</string>
   <key>NSNetworkVolumesUsageDescription</key>
-  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <string>SubtitleMediaPlayer 需要读取你选择的视频和同目录字幕文件。</string>
   <key>NSRemovableVolumesUsageDescription</key>
-  <string>CarlPlayer 需要读取你选择的视频和同目录字幕文件。</string>
+  <string>SubtitleMediaPlayer 需要读取你选择的视频和同目录字幕文件。</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>CFBundleDocumentTypes</key>

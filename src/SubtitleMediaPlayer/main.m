@@ -19,7 +19,7 @@ static void *CarlGetOpenGLProcAddress(void *ctx, const char *name) {
 }
 
 @protocol CarlVideoDropDelegate <NSObject>
-- (void)openVideoAtPath:(NSString *)path;
+- (void)openVideoAtURL:(NSURL *)url;
 @end
 
 @interface CarlMPVView : NSOpenGLView <NSDraggingDestination>
@@ -88,7 +88,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
         { MPV_RENDER_PARAM_INVALID, NULL }
     };
     if (mpv_render_context_create(&_renderContext, self.mpv, params) < 0) {
-        NSLog(@"CarlPlayer: failed to create mpv render context");
+        NSLog(@"SubtitleMediaPlayer: failed to create mpv render context");
         return;
     }
     mpv_render_context_set_update_callback(self.renderContext, CarlMPVRenderUpdate, (__bridge void *)self);
@@ -145,7 +145,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
                                                                        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     for (NSURL *url in urls) {
         if (CarlIsVideoURL(url)) {
-            [self.dropDelegate openVideoAtPath:url.path];
+            [self.dropDelegate openVideoAtURL:url];
             return YES;
         }
     }
@@ -187,7 +187,11 @@ static void CarlMPVRenderUpdate(void *ctx) {
 @property (nonatomic, copy) NSString *currentVideoPath;
 @property (nonatomic, copy) NSString *currentSubtitlePath;
 @property (nonatomic, copy) NSString *pendingOpenPath;
+@property (nonatomic, strong) NSURL *pendingOpenURL;
 @property (nonatomic, strong) NSUserDefaults *defaults;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *folderBookmarks;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSURL *> *activeFolderAccessURLs;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSURL *> *activeFileAccessURLs;
 @end
 
 @implementation AppDelegate
@@ -195,8 +199,8 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.defaults = [NSUserDefaults standardUserDefaults];
-    self.eventQueue = dispatch_queue_create("com.carl.local.CarlPlayer.mpv-events", DISPATCH_QUEUE_SERIAL);
-    self.subtitleQueue = dispatch_queue_create("com.carl.local.CarlPlayer.subtitles", DISPATCH_QUEUE_SERIAL);
+    self.eventQueue = dispatch_queue_create("com.carl.local.SubtitleMediaPlayer.mpv-events", DISPATCH_QUEUE_SERIAL);
+    self.subtitleQueue = dispatch_queue_create("com.carl.local.SubtitleMediaPlayer.subtitles", DISPATCH_QUEUE_SERIAL);
     [self registerDefaultSettings];
     [self buildMenu];
     [self buildWindow];
@@ -231,7 +235,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     (void)application;
     for (NSURL *url in urls) {
         if (CarlIsVideoURL(url)) {
-            [self openVideoAtPath:url.path];
+            [self openVideoAtURL:url];
             return;
         }
     }
@@ -241,7 +245,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     (void)sender;
     NSURL *url = [NSURL fileURLWithPath:filename];
     if (CarlIsVideoURL(url)) {
-        [self openVideoAtPath:filename];
+        [self openVideoAtURL:url];
         return YES;
     }
     return NO;
@@ -252,7 +256,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     for (NSString *filename in filenames) {
         NSURL *url = [NSURL fileURLWithPath:filename];
         if (CarlIsVideoURL(url)) {
-            [self openVideoAtPath:filename];
+            [self openVideoAtURL:url];
             opened = YES;
             break;
         }
@@ -268,6 +272,14 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     self.stopping = YES;
+    for (NSURL *url in self.activeFolderAccessURLs.allValues) {
+        [url stopAccessingSecurityScopedResource];
+    }
+    for (NSURL *url in self.activeFileAccessURLs.allValues) {
+        [url stopAccessingSecurityScopedResource];
+    }
+    [self.activeFolderAccessURLs removeAllObjects];
+    [self.activeFileAccessURLs removeAllObjects];
     if (self.mpv) {
         const char *cmd[] = { "quit", NULL };
         mpv_command_async(self.mpv, 0, cmd);
@@ -282,14 +294,25 @@ static void CarlMPVRenderUpdate(void *ctx) {
         @"subtitlesEnabled": @NO
     }];
     self.subtitleVisible = [self.defaults boolForKey:@"subtitlesEnabled"];
+    self.folderBookmarks = NSMutableDictionary.dictionary;
+    NSDictionary<NSString *, NSData *> *fileBookmarks = [NSDictionary dictionaryWithContentsOfFile:[self folderBookmarksPath]];
+    if (fileBookmarks) {
+        [self.folderBookmarks addEntriesFromDictionary:fileBookmarks];
+    }
+    NSDictionary<NSString *, NSData *> *savedBookmarks = [self.defaults dictionaryForKey:@"folderBookmarks"];
+    if (savedBookmarks) {
+        [self.folderBookmarks addEntriesFromDictionary:savedBookmarks];
+    }
+    self.activeFolderAccessURLs = NSMutableDictionary.dictionary;
+    self.activeFileAccessURLs = NSMutableDictionary.dictionary;
 }
 
 - (void)buildMenu {
     NSMenu *mainMenu = [[NSMenu alloc] initWithTitle:@""];
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
     [mainMenu addItem:appItem];
-    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"CarlPlayer"];
-    [appMenu addItemWithTitle:@"退出 CarlPlayer" action:@selector(terminate:) keyEquivalent:@"q"];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"SubtitleMediaPlayer"];
+    [appMenu addItemWithTitle:@"退出 SubtitleMediaPlayer" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
     NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"文件" action:nil keyEquivalent:@""];
@@ -310,7 +333,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
                                                          NSWindowStyleMaskResizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    self.window.title = @"CarlPlayer";
+    self.window.title = @"SubtitleMediaPlayer";
     self.window.minSize = NSMakeSize(720, 420);
     self.window.delegate = self;
     self.window.backgroundColor = NSColor.blackColor;
@@ -483,7 +506,12 @@ static void CarlMPVRenderUpdate(void *ctx) {
     [self.videoView attachMPV:self.mpv];
     [self startEventLoop];
 
-    if (self.pendingOpenPath.length) {
+    if (self.pendingOpenURL) {
+        NSURL *url = self.pendingOpenURL;
+        self.pendingOpenURL = nil;
+        self.pendingOpenPath = nil;
+        [self openVideoAtURL:url];
+    } else if (self.pendingOpenPath.length) {
         NSString *path = self.pendingOpenPath.copy;
         self.pendingOpenPath = nil;
         [self openVideoAtPath:path];
@@ -496,8 +524,11 @@ static void CarlMPVRenderUpdate(void *ctx) {
     for (NSUInteger i = 1; i < arguments.count; i++) {
         NSString *arg = arguments[i];
         NSURL *url = [NSURL fileURLWithPath:arg];
+        if (CarlIsVideoURL(url)) {
+            [self rememberDirectoryAccessForFileURL:url];
+        }
         if (CarlIsVideoURL(url) && [[NSFileManager defaultManager] fileExistsAtPath:arg]) {
-            [self openVideoAtPath:arg];
+            [self openVideoAtURL:url];
             return;
         }
     }
@@ -580,6 +611,157 @@ static void CarlMPVRenderUpdate(void *ctx) {
     }
 }
 
+- (NSString *)bookmarkKeyForDirectoryPath:(NSString *)path {
+    if (!path.length) { return nil; }
+    return path.stringByStandardizingPath;
+}
+
+- (NSString *)directoryPathForFilePath:(NSString *)path {
+    if (!path.length) { return nil; }
+    return [self bookmarkKeyForDirectoryPath:path.stringByDeletingLastPathComponent];
+}
+
+- (NSString *)folderBookmarksPath {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *error = nil;
+    NSURL *supportURL = [fm URLForDirectory:NSApplicationSupportDirectory
+                                   inDomain:NSUserDomainMask
+                          appropriateForURL:nil
+                                     create:YES
+                                      error:&error];
+    if (!supportURL) {
+        NSLog(@"SubtitleMediaPlayer: failed to locate Application Support: %@", error.localizedDescription);
+        return nil;
+    }
+    NSString *appSupport = [supportURL.path stringByAppendingPathComponent:@"SubtitleMediaPlayer"];
+    NSError *createError = nil;
+    if (![fm createDirectoryAtPath:appSupport withIntermediateDirectories:YES attributes:nil error:&createError]) {
+        NSLog(@"SubtitleMediaPlayer: failed to create Application Support directory: %@", createError.localizedDescription);
+        return nil;
+    }
+    return [appSupport stringByAppendingPathComponent:@"FolderBookmarks.plist"];
+}
+
+- (void)persistFolderBookmarks {
+    [self.defaults setObject:self.folderBookmarks forKey:@"folderBookmarks"];
+    [self.defaults synchronize];
+
+    NSString *path = [self folderBookmarksPath];
+    if (!path.length) { return; }
+
+    NSError *plistError = nil;
+    NSData *plistData = [NSPropertyListSerialization dataWithPropertyList:self.folderBookmarks
+                                                                    format:NSPropertyListBinaryFormat_v1_0
+                                                                   options:0
+                                                                     error:&plistError];
+    if (!plistData) {
+        NSLog(@"SubtitleMediaPlayer: failed to encode folder bookmarks: %@", plistError.localizedDescription);
+        return;
+    }
+
+    NSError *writeError = nil;
+    if (![plistData writeToFile:path options:NSDataWritingAtomic error:&writeError]) {
+        NSLog(@"SubtitleMediaPlayer: failed to persist folder bookmarks at %@: %@", path, writeError.localizedDescription);
+    }
+}
+
+- (void)rememberDirectoryAccessForFileURL:(NSURL *)fileURL {
+    if (!fileURL.isFileURL) { return; }
+    NSString *fileKey = fileURL.path.stringByStandardizingPath;
+    if (fileKey.length && !self.activeFileAccessURLs[fileKey]) {
+        [fileURL startAccessingSecurityScopedResource];
+        self.activeFileAccessURLs[fileKey] = fileURL;
+    }
+
+    NSURL *directoryURL = [fileURL URLByDeletingLastPathComponent];
+    NSString *key = [self bookmarkKeyForDirectoryPath:directoryURL.path];
+    if (!key.length || self.folderBookmarks[key]) {
+        [self startAccessForDirectoryPath:key];
+        return;
+    }
+
+    NSError *error = nil;
+    NSData *bookmark = [directoryURL bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope
+                              includingResourceValuesForKeys:nil
+                                               relativeToURL:nil
+                                                       error:&error];
+    if (!bookmark) {
+        bookmark = [directoryURL bookmarkDataWithOptions:0
+                          includingResourceValuesForKeys:nil
+                                           relativeToURL:nil
+                                                   error:&error];
+    }
+    if (!bookmark) {
+        NSLog(@"SubtitleMediaPlayer: failed to save folder bookmark for %@: %@", key, error.localizedDescription);
+        return;
+    }
+
+    self.folderBookmarks[key] = bookmark;
+    [self persistFolderBookmarks];
+    [self startAccessForDirectoryPath:key];
+}
+
+- (BOOL)startAccessForDirectoryOfFilePath:(NSString *)path {
+    NSString *directoryPath = [self directoryPathForFilePath:path];
+    return [self startAccessForDirectoryPath:directoryPath];
+}
+
+- (BOOL)startAccessForDirectoryPath:(NSString *)directoryPath {
+    NSString *key = [self bookmarkKeyForDirectoryPath:directoryPath];
+    if (!key.length) { return NO; }
+    if (self.activeFolderAccessURLs[key]) { return YES; }
+
+    NSData *bookmark = self.folderBookmarks[key];
+    if (!bookmark) { return NO; }
+
+    BOOL stale = NO;
+    NSError *error = nil;
+    NSURL *url = [NSURL URLByResolvingBookmarkData:bookmark
+                                           options:NSURLBookmarkResolutionWithSecurityScope
+                                     relativeToURL:nil
+                               bookmarkDataIsStale:&stale
+                                             error:&error];
+    if (!url) {
+        error = nil;
+        url = [NSURL URLByResolvingBookmarkData:bookmark
+                                        options:0
+                                  relativeToURL:nil
+                            bookmarkDataIsStale:&stale
+                                          error:&error];
+    }
+    if (!url) {
+        NSLog(@"SubtitleMediaPlayer: failed to restore folder bookmark for %@: %@", key, error.localizedDescription);
+        [self.folderBookmarks removeObjectForKey:key];
+        [self persistFolderBookmarks];
+        return NO;
+    }
+
+    [url startAccessingSecurityScopedResource];
+    self.activeFolderAccessURLs[key] = url;
+
+    if (stale) {
+        NSError *bookmarkError = nil;
+        NSData *freshBookmark = [url bookmarkDataWithOptions:NSURLBookmarkCreationWithSecurityScope
+                              includingResourceValuesForKeys:nil
+                                               relativeToURL:nil
+                                                       error:&bookmarkError];
+        if (!freshBookmark) {
+            freshBookmark = [url bookmarkDataWithOptions:0
+                          includingResourceValuesForKeys:nil
+                                           relativeToURL:nil
+                                                   error:&bookmarkError];
+        }
+        if (freshBookmark) {
+            self.folderBookmarks[key] = freshBookmark;
+            [self persistFolderBookmarks];
+        } else {
+            NSLog(@"SubtitleMediaPlayer: failed to refresh folder bookmark for %@: %@", key, bookmarkError.localizedDescription);
+        }
+    }
+
+    return YES;
+}
+
 - (void)openVideoPanel:(id)sender {
     (void)sender;
     NSOpenPanel *panel = [NSOpenPanel openPanel];
@@ -588,7 +770,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     panel.allowsMultipleSelection = NO;
     panel.allowedFileTypes = @[@"mp4", @"mkv", @"mov", @"ts"];
     if ([panel runModal] == NSModalResponseOK) {
-        [self openVideoAtPath:panel.URL.path];
+        [self openVideoAtURL:panel.URL];
     }
 }
 
@@ -604,8 +786,19 @@ static void CarlMPVRenderUpdate(void *ctx) {
     panel.allowsMultipleSelection = NO;
     panel.allowedFileTypes = @[@"srt"];
     if ([panel runModal] == NSModalResponseOK) {
+        [self rememberDirectoryAccessForFileURL:panel.URL];
         [self loadSubtitleAtPath:panel.URL.path show:YES];
     }
+}
+
+- (void)openVideoAtURL:(NSURL *)url {
+    if (!self.mpv || !self.folderBookmarks || !self.activeFolderAccessURLs) {
+        self.pendingOpenURL = url;
+        self.pendingOpenPath = url.path;
+        return;
+    }
+    [self rememberDirectoryAccessForFileURL:url];
+    [self openVideoAtPath:url.path];
 }
 
 - (void)openVideoAtPath:(NSString *)path {
@@ -613,6 +806,10 @@ static void CarlMPVRenderUpdate(void *ctx) {
         self.pendingOpenPath = path;
         return;
     }
+    if (self.folderBookmarks && self.activeFolderAccessURLs) {
+        [self rememberDirectoryAccessForFileURL:[NSURL fileURLWithPath:path]];
+    }
+    [self startAccessForDirectoryOfFilePath:path];
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
         self.statusLabel.stringValue = @"视频不存在";
         return;
@@ -624,7 +821,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     self.progressSlider.doubleValue = 0;
     self.progressSlider.maxValue = 1;
     self.statusLabel.stringValue = path.lastPathComponent;
-    self.window.title = [NSString stringWithFormat:@"CarlPlayer - %@", path.lastPathComponent];
+    self.window.title = [NSString stringWithFormat:@"SubtitleMediaPlayer - %@", path.lastPathComponent];
     [self command:@[@"loadfile", path, @"replace"]];
     [self setDoubleProperty:"volume" value:self.volumeSlider.doubleValue];
     [self setDoubleProperty:"speed" value:[self selectedSpeed]];
@@ -696,6 +893,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
 
 - (NSString *)sidecarSubtitleForVideo:(NSString *)videoPath {
     if (!videoPath) { return nil; }
+    [self startAccessForDirectoryOfFilePath:videoPath];
     NSString *dir = videoPath.stringByDeletingLastPathComponent;
     NSString *base = videoPath.lastPathComponent.stringByDeletingPathExtension;
     for (NSString *ext in @[@"srt", @"SRT"]) {
@@ -709,6 +907,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
 
 - (void)loadSubtitleAtPath:(NSString *)path show:(BOOL)show {
     if (!path) { return; }
+    [self startAccessForDirectoryOfFilePath:path];
     self.currentSubtitlePath = path;
     [self command:@[@"sub-add", path, @"select"]];
     [self setFlagProperty:"sub-visibility" value:show];
@@ -742,6 +941,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     self.statusLabel.stringValue = @"生成中：抽音频";
 
     NSString *videoPath = self.currentVideoPath.copy;
+    [self startAccessForDirectoryOfFilePath:videoPath];
     NSString *targetSRT = [[videoPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"srt"];
     NSString *tempRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSString *audioPath = [tempRoot stringByAppendingPathComponent:@"audio.wav"];
@@ -799,7 +999,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     NSArray<NSString *> *names = @[@"ggml-base.bin", @"ggml-small.bin", @"ggml-tiny.bin", @"ggml-medium.bin", @"ggml-large-v3.bin"];
     NSString *home = NSHomeDirectory();
     NSArray<NSString *> *dirs = @[
-        [home stringByAppendingPathComponent:@"Library/Application Support/CarlPlayer/models"],
+        [home stringByAppendingPathComponent:@"Library/Application Support/SubtitleMediaPlayer/models"],
         [home stringByAppendingPathComponent:@"models"],
         @"/opt/homebrew/share/whisper-cpp/models",
         @"/usr/local/share/whisper-cpp/models"

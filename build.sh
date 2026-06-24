@@ -2,12 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/dist/CarlPlayer.app"
+APP="$ROOT/dist/SubtitleMediaPlayer.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 MODEL_DIR="$ROOT/models"
-APP_SUPPORT_MODEL_DIR="$HOME/Library/Application Support/CarlPlayer/models"
+APP_SUPPORT_MODEL_DIR="$HOME/Library/Application Support/SubtitleMediaPlayer/models"
 MODEL_NAME="${CARLPLAYER_WHISPER_MODEL_NAME:-ggml-base.bin}"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
 MODEL_URL="${CARLPLAYER_WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME}"
@@ -48,7 +48,7 @@ fi
 
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RESOURCES/models"
-cp "$ROOT/src/CarlPlayer/Info.plist" "$CONTENTS/Info.plist"
+cp "$ROOT/src/SubtitleMediaPlayer/Info.plist" "$CONTENTS/Info.plist"
 
 MPV_CFLAGS="$(pkg-config --cflags mpv)"
 MPV_LIBS="$(pkg-config --libs mpv)"
@@ -56,8 +56,8 @@ MPV_LIBS="$(pkg-config --libs mpv)"
 clang -fobjc-arc -ObjC -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
   -mmacosx-version-min=13.0 \
   $MPV_CFLAGS \
-  "$ROOT/src/CarlPlayer/main.m" \
-  -o "$MACOS/CarlPlayer" \
+  "$ROOT/src/SubtitleMediaPlayer/main.m" \
+  -o "$MACOS/SubtitleMediaPlayer" \
   -framework Cocoa -framework OpenGL \
   $MPV_LIBS
 
@@ -79,13 +79,13 @@ fi
 
 xattr -cr "$APP" 2>/dev/null || true
 
-rm -f "$ROOT/dist/CarlPlayer.dmg"
+rm -f "$ROOT/dist/SubtitleMediaPlayer.dmg"
 if command -v hdiutil >/dev/null 2>&1; then
-  hdiutil create -volname CarlPlayer -srcfolder "$APP" -ov -format UDZO "$ROOT/dist/CarlPlayer.dmg" >/dev/null
-  xattr -c "$ROOT/dist/CarlPlayer.dmg" 2>/dev/null || true
+  hdiutil create -volname SubtitleMediaPlayer -srcfolder "$APP" -ov -format UDZO "$ROOT/dist/SubtitleMediaPlayer.dmg" >/dev/null
+  xattr -c "$ROOT/dist/SubtitleMediaPlayer.dmg" 2>/dev/null || true
 fi
 
 echo "Built: $APP"
-if [[ -f "$ROOT/dist/CarlPlayer.dmg" ]]; then
-  echo "Built: $ROOT/dist/CarlPlayer.dmg"
+if [[ -f "$ROOT/dist/SubtitleMediaPlayer.dmg" ]]; then
+  echo "Built: $ROOT/dist/SubtitleMediaPlayer.dmg"
 fi

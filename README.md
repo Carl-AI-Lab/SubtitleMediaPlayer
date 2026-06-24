@@ -1,4 +1,4 @@
-# CarlPlayer
+# SubtitleMediaPlayer
 
 需要安装：
 
@@ -16,7 +16,7 @@ brew install mpv ffmpeg whisper-cpp
 运行：
 
 ```bash
-open dist/CarlPlayer.app
+open dist/SubtitleMediaPlayer.app
 ```
 
-如果 Gatekeeper 拦截：在 Finder 里右键 `dist/CarlPlayer.app`，选择“打开”，再确认打开。
+如果 Gatekeeper 拦截：在 Finder 里右键 `dist/SubtitleMediaPlayer.app`，选择“打开”，再确认打开。

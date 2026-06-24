@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_NAME="${1:-CarlPlayer}"
+REPO_NAME="${1:-SubtitleMediaPlayer}"
 VISIBILITY="${GITHUB_VISIBILITY:-private}"
 
 if ! command -v gh >/dev/null 2>&1; then
