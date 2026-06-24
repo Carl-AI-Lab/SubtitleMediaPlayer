@@ -8,9 +8,9 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 MODEL_DIR="$ROOT/models"
 APP_SUPPORT_MODEL_DIR="$HOME/Library/Application Support/SubtitleMediaPlayer/models"
-MODEL_NAME="${CARLPLAYER_WHISPER_MODEL_NAME:-ggml-base.bin}"
+MODEL_NAME="${SUBTITLEMEDIAPLAYER_WHISPER_MODEL_NAME:-ggml-base.bin}"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
-MODEL_URL="${CARLPLAYER_WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME}"
+MODEL_URL="${SUBTITLEMEDIAPLAYER_WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME}"
 
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -36,7 +36,7 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
 fi
 
 mkdir -p "$MODEL_DIR"
-if [[ "${CARLPLAYER_SKIP_MODEL_DOWNLOAD:-0}" != "1" && ! -f "$MODEL_PATH" ]]; then
+if [[ "${SUBTITLEMEDIAPLAYER_SKIP_MODEL_DOWNLOAD:-0}" != "1" && ! -f "$MODEL_PATH" ]]; then
   echo "Downloading whisper model: $MODEL_NAME"
   if curl -L --fail --progress-bar "$MODEL_URL" -o "$MODEL_PATH.tmp"; then
     mv "$MODEL_PATH.tmp" "$MODEL_PATH"
@@ -67,7 +67,7 @@ if [[ -f "$MODEL_PATH" ]]; then
   cp "$MODEL_PATH" "$APP_SUPPORT_MODEL_DIR/$MODEL_NAME"
 fi
 
-SIGN_IDENTITY="${CARLPLAYER_CODE_SIGN_IDENTITY:-}"
+SIGN_IDENTITY="${SUBTITLEMEDIAPLAYER_CODE_SIGN_IDENTITY:-}"
 if [[ -z "$SIGN_IDENTITY" ]]; then
   SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'\"' '/Developer ID Application|Apple Development|Mac Developer/ {print $2; exit}')"
 fi

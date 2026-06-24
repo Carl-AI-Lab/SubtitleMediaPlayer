@@ -10,7 +10,7 @@
   <key>CFBundleExecutable</key>
   <string>SubtitleMediaPlayer</string>
   <key>CFBundleIdentifier</key>
-  <string>com.carl.local.SubtitleMediaPlayer</string>
+  <string>com.subtitlemediaplayer.local</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>

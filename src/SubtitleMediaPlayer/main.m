@@ -4,13 +4,13 @@
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
 
-static BOOL CarlIsVideoURL(NSURL *url) {
+static BOOL SMPIsVideoURL(NSURL *url) {
     if (!url.isFileURL) { return NO; }
     NSString *ext = url.pathExtension.lowercaseString;
     return [@[@"mp4", @"mkv", @"mov", @"ts"] containsObject:ext];
 }
 
-static void *CarlGetOpenGLProcAddress(void *ctx, const char *name) {
+static void *SMPGetOpenGLProcAddress(void *ctx, const char *name) {
     (void)ctx;
     CFStringRef symbol = CFStringCreateWithCString(kCFAllocatorDefault, name, kCFStringEncodingASCII);
     void *address = CFBundleGetFunctionPointerForName(CFBundleGetBundleWithIdentifier(CFSTR("com.apple.opengl")), symbol);
@@ -18,21 +18,21 @@ static void *CarlGetOpenGLProcAddress(void *ctx, const char *name) {
     return address;
 }
 
-@protocol CarlVideoDropDelegate <NSObject>
+@protocol SMPVideoDropDelegate <NSObject>
 - (void)openVideoAtURL:(NSURL *)url;
 @end
 
-@interface CarlMPVView : NSOpenGLView <NSDraggingDestination>
-@property (nonatomic, weak) id<CarlVideoDropDelegate> dropDelegate;
+@interface SMPMPVView : NSOpenGLView <NSDraggingDestination>
+@property (nonatomic, weak) id<SMPVideoDropDelegate> dropDelegate;
 @property (nonatomic, assign) mpv_handle *mpv;
 @property (nonatomic, assign) mpv_render_context *renderContext;
 - (void)attachMPV:(mpv_handle *)mpv;
 @end
 
-@implementation CarlMPVView
+@implementation SMPMPVView
 
-static void CarlMPVRenderUpdate(void *ctx) {
-    CarlMPVView *view = (__bridge CarlMPVView *)ctx;
+static void SMPMPVRenderUpdate(void *ctx) {
+    SMPMPVView *view = (__bridge SMPMPVView *)ctx;
     dispatch_async(dispatch_get_main_queue(), ^{
         [view setNeedsDisplay:YES];
     });
@@ -79,7 +79,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (void)createRenderContext {
     [self.openGLContext makeCurrentContext];
     mpv_opengl_init_params glInit = {
-        .get_proc_address = CarlGetOpenGLProcAddress,
+        .get_proc_address = SMPGetOpenGLProcAddress,
         .get_proc_address_ctx = NULL
     };
     mpv_render_param params[] = {
@@ -91,7 +91,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
         NSLog(@"SubtitleMediaPlayer: failed to create mpv render context");
         return;
     }
-    mpv_render_context_set_update_callback(self.renderContext, CarlMPVRenderUpdate, (__bridge void *)self);
+    mpv_render_context_set_update_callback(self.renderContext, SMPMPVRenderUpdate, (__bridge void *)self);
 }
 
 - (void)reshape {
@@ -135,7 +135,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     NSArray<NSURL *> *urls = [sender.draggingPasteboard readObjectsForClasses:@[[NSURL class]]
                                                                        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     for (NSURL *url in urls) {
-        if (CarlIsVideoURL(url)) { return NSDragOperationCopy; }
+        if (SMPIsVideoURL(url)) { return NSDragOperationCopy; }
     }
     return NSDragOperationNone;
 }
@@ -144,7 +144,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     NSArray<NSURL *> *urls = [sender.draggingPasteboard readObjectsForClasses:@[[NSURL class]]
                                                                        options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
     for (NSURL *url in urls) {
-        if (CarlIsVideoURL(url)) {
+        if (SMPIsVideoURL(url)) {
             [self.dropDelegate openVideoAtURL:url];
             return YES;
         }
@@ -161,9 +161,9 @@ static void CarlMPVRenderUpdate(void *ctx) {
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, CarlVideoDropDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, SMPVideoDropDelegate>
 @property (nonatomic, strong) NSWindow *window;
-@property (nonatomic, strong) CarlMPVView *videoView;
+@property (nonatomic, strong) SMPMPVView *videoView;
 @property (nonatomic, strong) NSButton *playButton;
 @property (nonatomic, strong) NSSlider *progressSlider;
 @property (nonatomic, strong) NSSlider *volumeSlider;
@@ -199,8 +199,8 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.defaults = [NSUserDefaults standardUserDefaults];
-    self.eventQueue = dispatch_queue_create("com.carl.local.SubtitleMediaPlayer.mpv-events", DISPATCH_QUEUE_SERIAL);
-    self.subtitleQueue = dispatch_queue_create("com.carl.local.SubtitleMediaPlayer.subtitles", DISPATCH_QUEUE_SERIAL);
+    self.eventQueue = dispatch_queue_create("com.subtitlemediaplayer.local.mpv-events", DISPATCH_QUEUE_SERIAL);
+    self.subtitleQueue = dispatch_queue_create("com.subtitlemediaplayer.local.subtitles", DISPATCH_QUEUE_SERIAL);
     [self registerDefaultSettings];
     [self buildMenu];
     [self buildWindow];
@@ -234,7 +234,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
     (void)application;
     for (NSURL *url in urls) {
-        if (CarlIsVideoURL(url)) {
+        if (SMPIsVideoURL(url)) {
             [self openVideoAtURL:url];
             return;
         }
@@ -244,7 +244,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
     (void)sender;
     NSURL *url = [NSURL fileURLWithPath:filename];
-    if (CarlIsVideoURL(url)) {
+    if (SMPIsVideoURL(url)) {
         [self openVideoAtURL:url];
         return YES;
     }
@@ -255,7 +255,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     BOOL opened = NO;
     for (NSString *filename in filenames) {
         NSURL *url = [NSURL fileURLWithPath:filename];
-        if (CarlIsVideoURL(url)) {
+        if (SMPIsVideoURL(url)) {
             [self openVideoAtURL:url];
             opened = YES;
             break;
@@ -344,7 +344,7 @@ static void CarlMPVRenderUpdate(void *ctx) {
     content.layer.backgroundColor = NSColor.blackColor.CGColor;
     self.paused = YES;
 
-    self.videoView = [[CarlMPVView alloc] initWithFrame:NSZeroRect];
+    self.videoView = [[SMPMPVView alloc] initWithFrame:NSZeroRect];
     self.videoView.dropDelegate = self;
     self.videoView.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:self.videoView];
@@ -524,10 +524,10 @@ static void CarlMPVRenderUpdate(void *ctx) {
     for (NSUInteger i = 1; i < arguments.count; i++) {
         NSString *arg = arguments[i];
         NSURL *url = [NSURL fileURLWithPath:arg];
-        if (CarlIsVideoURL(url)) {
+        if (SMPIsVideoURL(url)) {
             [self rememberDirectoryAccessForFileURL:url];
         }
-        if (CarlIsVideoURL(url) && [[NSFileManager defaultManager] fileExistsAtPath:arg]) {
+        if (SMPIsVideoURL(url) && [[NSFileManager defaultManager] fileExistsAtPath:arg]) {
             [self openVideoAtURL:url];
             return;
         }
