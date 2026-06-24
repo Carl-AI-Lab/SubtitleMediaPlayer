@@ -4,6 +4,9 @@
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
 
+static const double SMPVolumeBoostMultiplier = 3.0;
+static const double SMPMaxUISliderVolume = 100.0;
+
 static BOOL SMPIsVideoURL(NSURL *url) {
     if (!url.isFileURL) { return NO; }
     NSString *ext = url.pathExtension.lowercaseString;
@@ -196,6 +199,15 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 @implementation AppDelegate
 
+- (double)mpvVolumeForSliderValue:(double)value {
+    double sliderValue = MIN(MAX(value, 0.0), SMPMaxUISliderVolume);
+    return sliderValue * SMPVolumeBoostMultiplier;
+}
+
+- (double)sliderValueForMPVVolume:(double)value {
+    return MIN(MAX(value / SMPVolumeBoostMultiplier, 0.0), SMPMaxUISliderVolume);
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.defaults = [NSUserDefaults standardUserDefaults];
@@ -382,8 +394,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
     self.volumeSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     self.volumeSlider.minValue = 0;
-    self.volumeSlider.maxValue = 100;
-    self.volumeSlider.doubleValue = [self.defaults doubleForKey:@"volume"];
+    self.volumeSlider.maxValue = SMPMaxUISliderVolume;
+    self.volumeSlider.doubleValue = MIN(MAX([self.defaults doubleForKey:@"volume"], 0.0), SMPMaxUISliderVolume);
+    self.volumeSlider.toolTip = @"音量：拉满为 300% 软件增益";
     self.volumeSlider.target = self;
     self.volumeSlider.action = @selector(volumeChanged:);
     self.volumeSlider.continuous = YES;
@@ -483,13 +496,14 @@ static void SMPMPVRenderUpdate(void *ctx) {
     mpv_set_option_string(self.mpv, "keep-open", "yes");
     mpv_set_option_string(self.mpv, "hwdec", "auto-safe");
     mpv_set_option_string(self.mpv, "vo", "libmpv");
+    mpv_set_option_string(self.mpv, "volume-max", "300");
 
     if (mpv_initialize(self.mpv) < 0) {
         self.statusLabel.stringValue = @"mpv 初始化失败";
         return;
     }
 
-    double volume = [self.defaults doubleForKey:@"volume"];
+    double volume = [self mpvVolumeForSliderValue:self.volumeSlider.doubleValue];
     double speed = [self.defaults doubleForKey:@"speed"];
     int subVisible = self.subtitleVisible ? 1 : 0;
     mpv_set_property(self.mpv, "volume", MPV_FORMAT_DOUBLE, &volume);
@@ -592,8 +606,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
         self.progressSlider.maxValue = MAX(value, 1.0);
         [self refreshTimeUI];
     } else if ([name isEqualToString:@"volume"]) {
-        if (fabs(self.volumeSlider.doubleValue - value) > 0.5) {
-            self.volumeSlider.doubleValue = value;
+        double sliderValue = [self sliderValueForMPVVolume:value];
+        if (fabs(self.volumeSlider.doubleValue - sliderValue) > 0.5) {
+            self.volumeSlider.doubleValue = sliderValue;
         }
     } else if ([name isEqualToString:@"speed"]) {
         [self selectSpeed:value];
@@ -823,7 +838,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.statusLabel.stringValue = path.lastPathComponent;
     self.window.title = [NSString stringWithFormat:@"SubtitleMediaPlayer - %@", path.lastPathComponent];
     [self command:@[@"loadfile", path, @"replace"]];
-    [self setDoubleProperty:"volume" value:self.volumeSlider.doubleValue];
+    [self applyVolumeFromSliderValue:self.volumeSlider.doubleValue];
     [self setDoubleProperty:"speed" value:[self selectedSpeed]];
     [self setFlagProperty:"pause" value:NO];
     self.paused = NO;
@@ -850,7 +865,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
 - (void)volumeChanged:(NSSlider *)sender {
     double value = sender.doubleValue;
     [self.defaults setDouble:value forKey:@"volume"];
-    [self setDoubleProperty:"volume" value:value];
+    [self applyVolumeFromSliderValue:value];
+}
+
+- (void)applyVolumeFromSliderValue:(double)value {
+    [self setDoubleProperty:"volume" value:[self mpvVolumeForSliderValue:value]];
 }
 
 - (void)speedChanged:(id)sender {
@@ -964,14 +983,27 @@ static void SMPMPVRenderUpdate(void *ctx) {
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.statusLabel.stringValue = @"生成中：识别字幕";
+            self.statusLabel.stringValue = @"生成中：识别中英字幕";
         });
 
-        int whisperStatus = [self runTask:whisper arguments:@[@"-m", model, @"-f", audioPath, @"-l", @"zh", @"-osrt", @"-of", outputBase, @"-np"]];
+        NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。";
+        int whisperStatus = [self runTask:whisper arguments:@[
+            @"-m", model,
+            @"-f", audioPath,
+            @"-l", @"auto",
+            @"--prompt", prompt,
+            @"-bs", @"8",
+            @"-bo", @"8",
+            @"-osrt",
+            @"-of", outputBase,
+            @"-np"
+        ]];
         if (whisperStatus != 0 || ![fm fileExistsAtPath:tempSRT]) {
             [self finishSubtitleGenerationWithError:@"识别字幕失败" tempRoot:tempRoot];
             return;
         }
+
+        [self simplifySubtitleAtPath:tempSRT];
 
         [fm removeItemAtPath:targetSRT error:nil];
         NSError *moveError = nil;
@@ -996,7 +1028,14 @@ static void SMPMPVRenderUpdate(void *ctx) {
     if (envModel.length && [[NSFileManager defaultManager] fileExistsAtPath:envModel]) {
         return envModel;
     }
-    NSArray<NSString *> *names = @[@"ggml-base.bin", @"ggml-small.bin", @"ggml-tiny.bin", @"ggml-medium.bin", @"ggml-large-v3.bin"];
+    NSArray<NSString *> *names = @[
+        @"ggml-large-v3-turbo.bin",
+        @"ggml-large-v3.bin",
+        @"ggml-medium.bin",
+        @"ggml-small.bin",
+        @"ggml-base.bin",
+        @"ggml-tiny.bin"
+    ];
     NSString *home = NSHomeDirectory();
     NSArray<NSString *> *dirs = @[
         [home stringByAppendingPathComponent:@"Library/Application Support/SubtitleMediaPlayer/models"],
@@ -1020,6 +1059,31 @@ static void SMPMPVRenderUpdate(void *ctx) {
         }
     }
     return nil;
+}
+
+- (void)simplifySubtitleAtPath:(NSString *)path {
+    if (!path.length) { return; }
+
+    NSString *opencc = [self executablePath:@"opencc"];
+    if (opencc) {
+        NSString *convertedPath = [path.stringByDeletingPathExtension stringByAppendingPathExtension:@"simplified.srt"];
+        int status = [self runTask:opencc arguments:@[@"-c", @"t2s.json", @"-i", path, @"-o", convertedPath]];
+        if (status == 0 && [[NSFileManager defaultManager] fileExistsAtPath:convertedPath]) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            [[NSFileManager defaultManager] moveItemAtPath:convertedPath toPath:path error:nil];
+            return;
+        }
+        [[NSFileManager defaultManager] removeItemAtPath:convertedPath error:nil];
+    }
+
+    NSError *readError = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if (!content.length || readError) { return; }
+
+    NSMutableString *simplified = content.mutableCopy;
+    CFStringTransform((__bridge CFMutableStringRef)simplified, NULL, CFSTR("Hant-Hans"), false);
+    CFStringTransform((__bridge CFMutableStringRef)simplified, NULL, CFSTR("Traditional-Simplified"), false);
+    [simplified writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (NSString *)executablePath:(NSString *)name {

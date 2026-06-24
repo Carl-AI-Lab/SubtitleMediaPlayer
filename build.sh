@@ -8,7 +8,7 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 MODEL_DIR="$ROOT/models"
 APP_SUPPORT_MODEL_DIR="$HOME/Library/Application Support/SubtitleMediaPlayer/models"
-MODEL_NAME="${SUBTITLEMEDIAPLAYER_WHISPER_MODEL_NAME:-ggml-base.bin}"
+MODEL_NAME="${SUBTITLEMEDIAPLAYER_WHISPER_MODEL_NAME:-ggml-large-v3-turbo.bin}"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
 MODEL_URL="${SUBTITLEMEDIAPLAYER_WHISPER_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$MODEL_NAME}"
 
@@ -35,14 +35,18 @@ if ! command -v whisper-cli >/dev/null 2>&1; then
   brew install whisper-cpp
 fi
 
+if ! command -v opencc >/dev/null 2>&1; then
+  brew install opencc
+fi
+
 mkdir -p "$MODEL_DIR"
 if [[ "${SUBTITLEMEDIAPLAYER_SKIP_MODEL_DOWNLOAD:-0}" != "1" && ! -f "$MODEL_PATH" ]]; then
   echo "Downloading whisper model: $MODEL_NAME"
-  if curl -L --fail --progress-bar "$MODEL_URL" -o "$MODEL_PATH.tmp"; then
+  if curl -L --fail --no-progress-meter --retry 5 --retry-all-errors --retry-delay 3 -C - "$MODEL_URL" -o "$MODEL_PATH.tmp"; then
     mv "$MODEL_PATH.tmp" "$MODEL_PATH"
   else
-    rm -f "$MODEL_PATH.tmp"
-    echo "warning: model download failed; the app still builds, but auto subtitles need a local .bin model" >&2
+    echo "warning: model download failed; kept $MODEL_PATH.tmp for the next resumable build" >&2
+    echo "warning: the app still builds, but auto subtitles need a local .bin model" >&2
   fi
 fi
 

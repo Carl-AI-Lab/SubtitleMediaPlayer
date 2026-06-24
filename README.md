@@ -4,7 +4,7 @@
 
 ```bash
 xcode-select --install
-brew install mpv ffmpeg whisper-cpp
+brew install mpv ffmpeg whisper-cpp opencc
 ```
 
 构建：
