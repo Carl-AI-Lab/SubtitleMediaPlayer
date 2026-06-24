@@ -404,7 +404,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.manualSubtitleButton.translatesAutoresizingMaskIntoConstraints = NO;
     [controls addSubview:self.manualSubtitleButton];
 
-    self.autoSubtitleButton = [NSButton buttonWithTitle:@"生成中文字幕" target:self action:@selector(generateSubtitle:)];
+    self.autoSubtitleButton = [NSButton buttonWithTitle:@"自动识别字幕" target:self action:@selector(generateSubtitle:)];
     self.autoSubtitleButton.bezelStyle = NSBezelStyleTexturedRounded;
     self.autoSubtitleButton.translatesAutoresizingMaskIntoConstraints = NO;
     [controls addSubview:self.autoSubtitleButton];
@@ -448,7 +448,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
         [self.autoSubtitleButton.leadingAnchor constraintEqualToAnchor:self.manualSubtitleButton.trailingAnchor constant:8],
         [self.autoSubtitleButton.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
-        [self.autoSubtitleButton.widthAnchor constraintEqualToConstant:126],
+        [self.autoSubtitleButton.widthAnchor constraintEqualToConstant:132],
 
         [self.timeLabel.leadingAnchor constraintEqualToAnchor:self.autoSubtitleButton.trailingAnchor constant:12],
         [self.timeLabel.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
