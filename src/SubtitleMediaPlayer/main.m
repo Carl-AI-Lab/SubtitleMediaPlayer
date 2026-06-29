@@ -176,6 +176,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, strong) NSTextField *timeLabel;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSTimer *redrawTimer;
+@property (nonatomic, strong) id keyEventMonitor;
 @property (nonatomic, assign) mpv_handle *mpv;
 @property (nonatomic, strong) dispatch_queue_t eventQueue;
 @property (nonatomic, strong) dispatch_queue_t subtitleQueue;
@@ -206,6 +207,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     [self registerDefaultSettings];
     [self buildMenu];
     [self buildWindow];
+    [self installKeyboardShortcuts];
     [self setupMPV];
     [self startRedrawTimer];
     [self openInitialArgumentIfNeeded];
@@ -274,6 +276,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     self.stopping = YES;
+    if (self.keyEventMonitor) {
+        [NSEvent removeMonitor:self.keyEventMonitor];
+        self.keyEventMonitor = nil;
+    }
     for (NSURL *url in self.activeFolderAccessURLs.allValues) {
         [url stopAccessingSecurityScopedResource];
     }
@@ -307,6 +313,39 @@ static void SMPMPVRenderUpdate(void *ctx) {
     }
     self.activeFolderAccessURLs = NSMutableDictionary.dictionary;
     self.activeFileAccessURLs = NSMutableDictionary.dictionary;
+}
+
+- (void)installKeyboardShortcuts {
+    __weak AppDelegate *weakSelf = self;
+    self.keyEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                                 handler:^NSEvent *(NSEvent *event) {
+        AppDelegate *strongSelf = weakSelf;
+        if (!strongSelf || event.window != strongSelf.window) {
+            return event;
+        }
+        return [strongSelf handleKeyboardShortcut:event] ? nil : event;
+    }];
+}
+
+- (BOOL)handleKeyboardShortcut:(NSEvent *)event {
+    NSEventModifierFlags blockedModifiers = NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl;
+    if ((event.modifierFlags & blockedModifiers) != 0) {
+        return NO;
+    }
+
+    switch (event.keyCode) {
+        case 49:
+            [self togglePlay:nil];
+            return YES;
+        case 123:
+            [self seekRelative:-15.0];
+            return YES;
+        case 124:
+            [self seekRelative:15.0];
+            return YES;
+        default:
+            return NO;
+    }
 }
 
 - (void)buildMenu {
@@ -846,10 +885,21 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 - (void)progressChanged:(NSSlider *)sender {
     if (!self.currentVideoPath || self.duration <= 0) { return; }
-    double seconds = sender.doubleValue;
-    self.position = seconds;
+    [self seekToSeconds:sender.doubleValue];
+}
+
+- (void)seekRelative:(double)delta {
+    if (!self.currentVideoPath || self.duration <= 0) { return; }
+    [self seekToSeconds:self.position + delta];
+}
+
+- (void)seekToSeconds:(double)seconds {
+    if (!self.currentVideoPath || self.duration <= 0) { return; }
+    double clamped = MIN(MAX(seconds, 0.0), self.duration);
+    self.position = clamped;
+    self.progressSlider.doubleValue = clamped;
     [self refreshTimeUI];
-    [self command:@[@"seek", [NSString stringWithFormat:@"%.3f", seconds], @"absolute", @"exact"]];
+    [self command:@[@"seek", [NSString stringWithFormat:@"%.3f", clamped], @"absolute", @"exact"]];
 }
 
 - (void)volumeChanged:(NSSlider *)sender {
