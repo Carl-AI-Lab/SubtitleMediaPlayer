@@ -1000,6 +1000,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.statusLabel.stringValue = @"生成中：抽音频";
 
     NSString *videoPath = self.currentVideoPath.copy;
+    double mediaDuration = self.duration;
     [self startAccessForDirectoryOfFilePath:videoPath];
     NSString *targetSRT = [[videoPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"srt"];
     NSString *tempRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
@@ -1027,23 +1028,19 @@ static void SMPMPVRenderUpdate(void *ctx) {
         });
 
         NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。";
-        int whisperStatus = [self runTask:whisper arguments:@[
-            @"-m", model,
-            @"-f", audioPath,
-            @"-l", @"auto",
-            @"--prompt", prompt,
-            @"-bs", @"8",
-            @"-bo", @"8",
-            @"-osrt",
-            @"-of", outputBase,
-            @"-np"
-        ]];
+        int whisperStatus = [self transcribeAudioAtPath:audioPath
+                                                  model:model
+                                                whisper:whisper
+                                                 prompt:prompt
+                                             outputBase:outputBase
+                                           mediaDuration:mediaDuration];
         if (whisperStatus != 0 || ![fm fileExistsAtPath:tempSRT]) {
             [self finishSubtitleGenerationWithError:@"识别字幕失败" tempRoot:tempRoot];
             return;
         }
 
         [self simplifySubtitleAtPath:tempSRT];
+        [self removeRepeatedSubtitleRunsAtPath:tempSRT];
 
         [fm removeItemAtPath:targetSRT error:nil];
         NSError *moveError = nil;
@@ -1101,6 +1098,126 @@ static void SMPMPVRenderUpdate(void *ctx) {
     return nil;
 }
 
+- (int)transcribeAudioAtPath:(NSString *)audioPath
+                       model:(NSString *)model
+                     whisper:(NSString *)whisper
+                      prompt:(NSString *)prompt
+                  outputBase:(NSString *)outputBase
+               mediaDuration:(double)mediaDuration {
+    double chunkSeconds = 300.0;
+    if (mediaDuration <= chunkSeconds * 2.0) {
+        return [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
+                                                                     audioPath:audioPath
+                                                                       prompt:prompt
+                                                                    outputBase:outputBase
+                                                                      offsetMS:0
+                                                                    durationMS:0]];
+    }
+
+    NSUInteger chunkCount = (NSUInteger)ceil(mediaDuration / chunkSeconds);
+    NSMutableArray<NSString *> *chunkSRTs = NSMutableArray.array;
+    for (NSUInteger index = 0; index < chunkCount; index++) {
+        double offsetSeconds = (double)index * chunkSeconds;
+        double durationSeconds = MIN(chunkSeconds, mediaDuration - offsetSeconds);
+        if (durationSeconds <= 0) { continue; }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.statusLabel.stringValue = [NSString stringWithFormat:@"生成中：识别中英字幕 %lu/%lu",
+                                            (unsigned long)(index + 1),
+                                            (unsigned long)chunkCount];
+        });
+
+        NSString *chunkBase = [outputBase stringByAppendingFormat:@"-%03lu", (unsigned long)(index + 1)];
+        int status = [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
+                                                                           audioPath:audioPath
+                                                                             prompt:prompt
+                                                                          outputBase:chunkBase
+                                                                            offsetMS:(NSInteger)llround(offsetSeconds * 1000.0)
+                                                                          durationMS:(NSInteger)llround(durationSeconds * 1000.0)]];
+        NSString *chunkSRT = [chunkBase stringByAppendingPathExtension:@"srt"];
+        if (status != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:chunkSRT]) {
+            return status == 0 ? -1 : status;
+        }
+        [chunkSRTs addObject:chunkSRT];
+    }
+
+    return [self mergeSubtitleFiles:chunkSRTs toPath:[outputBase stringByAppendingPathExtension:@"srt"]] ? 0 : -1;
+}
+
+- (NSArray<NSString *> *)whisperArgumentsWithModel:(NSString *)model
+                                         audioPath:(NSString *)audioPath
+                                           prompt:(NSString *)prompt
+                                        outputBase:(NSString *)outputBase
+                                          offsetMS:(NSInteger)offsetMS
+                                        durationMS:(NSInteger)durationMS {
+    NSMutableArray<NSString *> *arguments = [@[
+        @"-m", model,
+        @"-f", audioPath,
+        @"-l", @"auto",
+        @"--prompt", prompt,
+        @"-mc", @"0",
+        @"-ml", @"96",
+        @"-sow",
+        @"-bs", @"8",
+        @"-bo", @"8",
+        @"-osrt",
+        @"-of", outputBase,
+        @"-np"
+    ] mutableCopy];
+    if (offsetMS > 0) {
+        [arguments addObjectsFromArray:@[@"-ot", [NSString stringWithFormat:@"%ld", (long)offsetMS]]];
+    }
+    if (durationMS > 0) {
+        [arguments addObjectsFromArray:@[@"-d", [NSString stringWithFormat:@"%ld", (long)durationMS]]];
+    }
+    return arguments;
+}
+
+- (BOOL)mergeSubtitleFiles:(NSArray<NSString *> *)paths toPath:(NSString *)targetPath {
+    NSMutableString *output = NSMutableString.string;
+    NSUInteger sequence = 1;
+    for (NSString *path in paths) {
+        NSError *readError = nil;
+        NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+        if (!content.length || readError) { return NO; }
+        NSString *normalizedContent = [[content stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+        NSArray<NSString *> *lines = [normalizedContent componentsSeparatedByString:@"\n"];
+        NSMutableArray<NSString *> *current = NSMutableArray.array;
+        for (NSString *line in lines) {
+            if (line.length == 0) {
+                if (current.count > 0) {
+                    sequence = [self appendSubtitleBlock:current toString:output sequence:sequence];
+                    [current removeAllObjects];
+                }
+            } else {
+                [current addObject:line];
+            }
+        }
+        if (current.count > 0) {
+            sequence = [self appendSubtitleBlock:current toString:output sequence:sequence];
+        }
+    }
+    return [output writeToFile:targetPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (NSUInteger)appendSubtitleBlock:(NSArray<NSString *> *)blockLines
+                         toString:(NSMutableString *)output
+                         sequence:(NSUInteger)sequence {
+    NSUInteger timeIndex = NSNotFound;
+    for (NSUInteger i = 0; i < blockLines.count; i++) {
+        if ([blockLines[i] containsString:@"-->"]) {
+            timeIndex = i;
+            break;
+        }
+    }
+    if (timeIndex == NSNotFound || timeIndex + 1 >= blockLines.count) {
+        return sequence;
+    }
+    NSArray<NSString *> *payload = [blockLines subarrayWithRange:NSMakeRange(timeIndex, blockLines.count - timeIndex)];
+    [output appendFormat:@"%lu\n%@\n\n", (unsigned long)sequence, [payload componentsJoinedByString:@"\n"]];
+    return sequence + 1;
+}
+
 - (void)simplifySubtitleAtPath:(NSString *)path {
     if (!path.length) { return; }
 
@@ -1124,6 +1241,145 @@ static void SMPMPVRenderUpdate(void *ctx) {
     CFStringTransform((__bridge CFMutableStringRef)simplified, NULL, CFSTR("Hant-Hans"), false);
     CFStringTransform((__bridge CFMutableStringRef)simplified, NULL, CFSTR("Traditional-Simplified"), false);
     [simplified writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (void)removeRepeatedSubtitleRunsAtPath:(NSString *)path {
+    NSError *readError = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if (!content.length || readError) { return; }
+
+    NSString *normalizedContent = [[content stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [normalizedContent componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSArray<NSString *> *> *rawBlocks = NSMutableArray.array;
+    NSMutableArray<NSString *> *current = NSMutableArray.array;
+    for (NSString *line in lines) {
+        if (line.length == 0) {
+            if (current.count > 0) {
+                [rawBlocks addObject:current.copy];
+                [current removeAllObjects];
+            }
+        } else {
+            [current addObject:line];
+        }
+    }
+    if (current.count > 0) {
+        [rawBlocks addObject:current.copy];
+    }
+
+    NSMutableArray<NSMutableDictionary *> *blocks = NSMutableArray.array;
+    for (NSArray<NSString *> *blockLines in rawBlocks) {
+        NSInteger timeIndex = NSNotFound;
+        for (NSUInteger i = 0; i < blockLines.count; i++) {
+            if ([blockLines[i] containsString:@"-->"]) {
+                timeIndex = (NSInteger)i;
+                break;
+            }
+        }
+        if (timeIndex == NSNotFound || timeIndex + 1 >= (NSInteger)blockLines.count) {
+            [blocks addObject:[@{@"parsed": @NO, @"lines": blockLines, @"remove": @NO} mutableCopy]];
+            continue;
+        }
+
+        double start = 0;
+        double end = 0;
+        if (![self parseSRTTimeLine:blockLines[(NSUInteger)timeIndex] start:&start end:&end]) {
+            [blocks addObject:[@{@"parsed": @NO, @"lines": blockLines, @"remove": @NO} mutableCopy]];
+            continue;
+        }
+
+        NSArray<NSString *> *textLines = [blockLines subarrayWithRange:NSMakeRange((NSUInteger)timeIndex + 1, blockLines.count - (NSUInteger)timeIndex - 1)];
+        NSString *text = [textLines componentsJoinedByString:@"\n"];
+        [blocks addObject:[@{
+            @"parsed": @YES,
+            @"start": @(start),
+            @"end": @(end),
+            @"text": text,
+            @"norm": [self normalizedSubtitleText:text],
+            @"remove": @NO
+        } mutableCopy]];
+    }
+
+    NSUInteger removed = 0;
+    NSUInteger i = 0;
+    while (i < blocks.count) {
+        NSMutableDictionary *first = blocks[i];
+        if (![first[@"parsed"] boolValue] || [first[@"norm"] length] == 0) {
+            i++;
+            continue;
+        }
+        NSUInteger j = i + 1;
+        while (j < blocks.count &&
+               [blocks[j][@"parsed"] boolValue] &&
+               [blocks[j][@"norm"] isEqualToString:first[@"norm"]]) {
+            j++;
+        }
+
+        NSUInteger runCount = j - i;
+        double runStart = [blocks[i][@"start"] doubleValue];
+        double runEnd = [blocks[j - 1][@"end"] doubleValue];
+        if (runCount >= 10 && runEnd - runStart >= 30.0) {
+            NSUInteger keep = 3;
+            for (NSUInteger k = i + keep; k < j; k++) {
+                blocks[k][@"remove"] = @YES;
+                removed++;
+            }
+        }
+        i = j;
+    }
+
+    BOOL fixedDuration = NO;
+    NSMutableString *output = NSMutableString.string;
+    NSUInteger sequence = 1;
+    for (NSMutableDictionary *block in blocks) {
+        if ([block[@"remove"] boolValue]) { continue; }
+        if (![block[@"parsed"] boolValue]) {
+            NSArray<NSString *> *blockLines = block[@"lines"];
+            [output appendFormat:@"%@\n\n", [blockLines componentsJoinedByString:@"\n"]];
+            continue;
+        }
+        double start = [block[@"start"] doubleValue];
+        double end = [block[@"end"] doubleValue];
+        if (end <= start) {
+            end = start + 0.5;
+            fixedDuration = YES;
+        }
+        [output appendFormat:@"%lu\n%@ --> %@\n%@\n\n",
+         (unsigned long)sequence++,
+         [self formatSRTTimestamp:start],
+         [self formatSRTTimestamp:end],
+         block[@"text"]];
+    }
+
+    if (removed > 0 || fixedDuration) {
+        [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+- (BOOL)parseSRTTimeLine:(NSString *)line start:(double *)start end:(double *)end {
+    int sh = 0, sm = 0, ss = 0, sms = 0, eh = 0, em = 0, es = 0, ems = 0;
+    int matched = sscanf(line.UTF8String, "%d:%d:%d,%d --> %d:%d:%d,%d", &sh, &sm, &ss, &sms, &eh, &em, &es, &ems);
+    if (matched != 8) { return NO; }
+    if (start) { *start = (double)(sh * 3600 + sm * 60 + ss) + ((double)sms / 1000.0); }
+    if (end) { *end = (double)(eh * 3600 + em * 60 + es) + ((double)ems / 1000.0); }
+    return YES;
+}
+
+- (NSString *)formatSRTTimestamp:(double)seconds {
+    int totalMilliseconds = (int)llround(MAX(seconds, 0.0) * 1000.0);
+    int hours = totalMilliseconds / 3600000;
+    totalMilliseconds %= 3600000;
+    int minutes = totalMilliseconds / 60000;
+    totalMilliseconds %= 60000;
+    int secs = totalMilliseconds / 1000;
+    int millis = totalMilliseconds % 1000;
+    return [NSString stringWithFormat:@"%02d:%02d:%02d,%03d", hours, minutes, secs, millis];
+}
+
+- (NSString *)normalizedSubtitleText:(NSString *)text {
+    NSMutableCharacterSet *allowed = NSCharacterSet.letterCharacterSet.mutableCopy;
+    [allowed formUnionWithCharacterSet:NSCharacterSet.decimalDigitCharacterSet];
+    NSArray<NSString *> *parts = [[text lowercaseString] componentsSeparatedByCharactersInSet:allowed.invertedSet];
+    return [parts componentsJoinedByString:@""];
 }
 
 - (NSString *)executablePath:(NSString *)name {
