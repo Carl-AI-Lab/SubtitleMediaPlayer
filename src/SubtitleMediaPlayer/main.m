@@ -1027,9 +1027,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
             self.statusLabel.stringValue = @"生成中：识别中英字幕";
         });
 
-        NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。";
+        NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
         int whisperStatus = [self transcribeAudioAtPath:audioPath
                                                   model:model
+                                                 ffmpeg:ffmpeg
                                                 whisper:whisper
                                                  prompt:prompt
                                              outputBase:outputBase
@@ -1100,11 +1101,12 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 - (int)transcribeAudioAtPath:(NSString *)audioPath
                        model:(NSString *)model
+                      ffmpeg:(NSString *)ffmpeg
                      whisper:(NSString *)whisper
                       prompt:(NSString *)prompt
                   outputBase:(NSString *)outputBase
                mediaDuration:(double)mediaDuration {
-    double chunkSeconds = 300.0;
+    double chunkSeconds = 60.0;
     if (mediaDuration <= chunkSeconds * 2.0) {
         return [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
                                                                      audioPath:audioPath
@@ -1128,12 +1130,29 @@ static void SMPMPVRenderUpdate(void *ctx) {
         });
 
         NSString *chunkBase = [outputBase stringByAppendingFormat:@"-%03lu", (unsigned long)(index + 1)];
+        NSString *chunkAudio = [chunkBase stringByAppendingPathExtension:@"wav"];
+        int audioStatus = [self runTask:ffmpeg arguments:@[
+            @"-hide_banner",
+            @"-loglevel", @"error",
+            @"-y",
+            @"-ss", [NSString stringWithFormat:@"%.3f", offsetSeconds],
+            @"-t", [NSString stringWithFormat:@"%.3f", durationSeconds],
+            @"-i", audioPath,
+            @"-ac", @"1",
+            @"-ar", @"16000",
+            @"-c:a", @"pcm_s16le",
+            chunkAudio
+        ]];
+        if (audioStatus != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:chunkAudio]) {
+            return audioStatus == 0 ? -1 : audioStatus;
+        }
+
         int status = [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
-                                                                           audioPath:audioPath
+                                                                           audioPath:chunkAudio
                                                                              prompt:prompt
                                                                           outputBase:chunkBase
                                                                             offsetMS:(NSInteger)llround(offsetSeconds * 1000.0)
-                                                                          durationMS:(NSInteger)llround(durationSeconds * 1000.0)]];
+                                                                          durationMS:0]];
         NSString *chunkSRT = [chunkBase stringByAppendingPathExtension:@"srt"];
         if (status != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:chunkSRT]) {
             return status == 0 ? -1 : status;
@@ -1153,7 +1172,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     NSMutableArray<NSString *> *arguments = [@[
         @"-m", model,
         @"-f", audioPath,
-        @"-l", @"auto",
+        @"-l", @"zh",
         @"--prompt", prompt,
         @"-mc", @"0",
         @"-ml", @"96",
