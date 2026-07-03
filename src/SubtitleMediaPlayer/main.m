@@ -237,10 +237,16 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 - (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
     (void)application;
+    BOOL useCurrentWindow = !self.currentVideoPath.length && !self.pendingOpenPath.length;
     for (NSURL *url in urls) {
         if (SMPIsVideoURL(url)) {
-            [self openVideoAtURL:url];
-            return;
+            if (useCurrentWindow) {
+                [self openVideoAtURL:url];
+                useCurrentWindow = NO;
+            } else {
+                [self rememberDirectoryAccessForFileURL:url];
+                [self launchNewInstanceForVideoURL:url];
+            }
         }
     }
 }
@@ -257,12 +263,18 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
     BOOL opened = NO;
+    BOOL useCurrentWindow = !self.currentVideoPath.length && !self.pendingOpenPath.length;
     for (NSString *filename in filenames) {
         NSURL *url = [NSURL fileURLWithPath:filename];
         if (SMPIsVideoURL(url)) {
-            [self openVideoAtURL:url];
+            if (useCurrentWindow) {
+                [self openVideoAtURL:url];
+                useCurrentWindow = NO;
+            } else {
+                [self rememberDirectoryAccessForFileURL:url];
+                [self launchNewInstanceForVideoURL:url];
+            }
             opened = YES;
-            break;
         }
     }
     [sender replyToOpenOrPrint:opened ? NSApplicationDelegateReplySuccess : NSApplicationDelegateReplyFailure];
@@ -842,7 +854,30 @@ static void SMPMPVRenderUpdate(void *ctx) {
         return;
     }
     [self rememberDirectoryAccessForFileURL:url];
+    if (self.currentVideoPath.length && [self launchNewInstanceForVideoURL:url]) {
+        return;
+    }
     [self openVideoAtPath:url.path];
+}
+
+- (BOOL)launchNewInstanceForVideoURL:(NSURL *)url {
+    if (!url.path.length) { return NO; }
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath;
+    if (!bundlePath.length) { return NO; }
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/open"];
+    task.arguments = @[@"-n", bundlePath, @"--args", url.path];
+    NSFileHandle *nullDevice = [NSFileHandle fileHandleWithNullDevice];
+    task.standardOutput = nullDevice;
+    task.standardError = nullDevice;
+
+    NSError *error = nil;
+    BOOL launched = [task launchAndReturnError:&error];
+    if (!launched) {
+        NSLog(@"SubtitleMediaPlayer: failed to launch another instance: %@", error.localizedDescription);
+    }
+    return launched;
 }
 
 - (void)openVideoAtPath:(NSString *)path {
@@ -989,9 +1024,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
         return;
     }
     NSString *ffmpeg = [self executablePath:@"ffmpeg"];
+    NSString *ffprobe = [self executablePath:@"ffprobe"];
     NSString *whisper = [self executablePath:@"whisper-cli"];
-    if (!ffmpeg || !whisper) {
-        self.statusLabel.stringValue = @"缺少 ffmpeg 或 whisper-cli";
+    if (!ffmpeg || !ffprobe || !whisper) {
+        self.statusLabel.stringValue = @"缺少 ffmpeg/ffprobe 或 whisper-cli";
         return;
     }
 
@@ -1027,6 +1063,14 @@ static void SMPMPVRenderUpdate(void *ctx) {
             self.statusLabel.stringValue = @"生成中：识别中英字幕";
         });
 
+        double transcriptionDuration = mediaDuration;
+        if (transcriptionDuration <= 0) {
+            transcriptionDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
+        }
+        if (transcriptionDuration <= 0) {
+            transcriptionDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
+        }
+
         NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
         int whisperStatus = [self transcribeAudioAtPath:audioPath
                                                   model:model
@@ -1034,7 +1078,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                 whisper:whisper
                                                  prompt:prompt
                                              outputBase:outputBase
-                                           mediaDuration:mediaDuration];
+                                           mediaDuration:transcriptionDuration];
+        if (whisperStatus == -2) {
+            [self finishSubtitleGenerationWithError:@"没有识别到语音" tempRoot:tempRoot];
+            return;
+        }
         if (whisperStatus != 0 || ![fm fileExistsAtPath:tempSRT]) {
             [self finishSubtitleGenerationWithError:@"识别字幕失败" tempRoot:tempRoot];
             return;
@@ -1108,12 +1156,15 @@ static void SMPMPVRenderUpdate(void *ctx) {
                mediaDuration:(double)mediaDuration {
     double chunkSeconds = 60.0;
     if (mediaDuration <= chunkSeconds * 2.0) {
-        return [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
-                                                                     audioPath:audioPath
-                                                                       prompt:prompt
-                                                                    outputBase:outputBase
-                                                                      offsetMS:0
-                                                                    durationMS:0]];
+        int status = [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
+                                                                           audioPath:audioPath
+                                                                             prompt:prompt
+                                                                          outputBase:outputBase
+                                                                            offsetMS:0
+                                                                          durationMS:0]];
+        if (status != 0) { return status; }
+        NSString *srtPath = [outputBase stringByAppendingPathExtension:@"srt"];
+        return [self subtitleFileHasUsableContentAtPath:srtPath] ? 0 : -2;
     }
 
     NSUInteger chunkCount = (NSUInteger)ceil(mediaDuration / chunkSeconds);
@@ -1154,12 +1205,15 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                                             offsetMS:(NSInteger)llround(offsetSeconds * 1000.0)
                                                                           durationMS:0]];
         NSString *chunkSRT = [chunkBase stringByAppendingPathExtension:@"srt"];
-        if (status != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:chunkSRT]) {
-            return status == 0 ? -1 : status;
+        if (status != 0) {
+            return status;
         }
-        [chunkSRTs addObject:chunkSRT];
+        if ([self subtitleFileHasUsableContentAtPath:chunkSRT]) {
+            [chunkSRTs addObject:chunkSRT];
+        }
     }
 
+    if (chunkSRTs.count == 0) { return -2; }
     return [self mergeSubtitleFiles:chunkSRTs toPath:[outputBase stringByAppendingPathExtension:@"srt"]] ? 0 : -1;
 }
 
@@ -1217,6 +1271,42 @@ static void SMPMPVRenderUpdate(void *ctx) {
         }
     }
     return [output writeToFile:targetPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
+- (BOOL)subtitleFileHasUsableContentAtPath:(NSString *)path {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) { return NO; }
+    NSError *readError = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if (!content.length || readError) { return NO; }
+    return [content containsString:@"-->"];
+}
+
+- (double)mediaDurationAtPath:(NSString *)path ffprobe:(NSString *)ffprobe {
+    if (!path.length || !ffprobe.length) { return 0; }
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:ffprobe];
+    task.arguments = @[
+        @"-v", @"error",
+        @"-show_entries", @"format=duration",
+        @"-of", @"default=noprint_wrappers=1:nokey=1",
+        path
+    ];
+    NSPipe *pipe = [NSPipe pipe];
+    task.standardOutput = pipe;
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        NSLog(@"SubtitleMediaPlayer: ffprobe failed to launch: %@", error.localizedDescription);
+        return 0;
+    }
+    [task waitUntilExit];
+    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+    if (task.terminationStatus != 0 || data.length == 0) { return 0; }
+
+    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return output.doubleValue;
 }
 
 - (NSUInteger)appendSubtitleBlock:(NSArray<NSString *> *)blockLines

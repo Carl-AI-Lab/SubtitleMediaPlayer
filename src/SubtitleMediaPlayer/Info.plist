@@ -23,6 +23,8 @@
   <string>1</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
+  <key>LSMultipleInstancesProhibited</key>
+  <false/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSDesktopFolderUsageDescription</key>
