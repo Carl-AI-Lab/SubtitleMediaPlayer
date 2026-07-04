@@ -1154,13 +1154,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
             self.statusLabel.stringValue = @"生成中：识别中英字幕";
         });
 
-        double transcriptionDuration = mediaDuration;
-        if (transcriptionDuration <= 0) {
-            transcriptionDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
-        }
-        if (transcriptionDuration <= 0) {
-            transcriptionDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
-        }
+        double audioDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
+        double videoDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
+        double transcriptionDuration = MAX(mediaDuration, MAX(audioDuration, videoDuration));
 
         NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
         int whisperStatus = [self transcribeAudioAtPath:audioPath
@@ -1293,13 +1289,16 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                                            audioPath:chunkAudio
                                                                              prompt:prompt
                                                                           outputBase:chunkBase
-                                                                            offsetMS:(NSInteger)llround(offsetSeconds * 1000.0)
+                                                                            offsetMS:0
                                                                           durationMS:0]];
         NSString *chunkSRT = [chunkBase stringByAppendingPathExtension:@"srt"];
         if (status != 0) {
             return status;
         }
         if ([self subtitleFileHasUsableContentAtPath:chunkSRT]) {
+            if (![self shiftSubtitleFileAtPath:chunkSRT bySeconds:offsetSeconds]) {
+                return -1;
+            }
             [chunkSRTs addObject:chunkSRT];
         }
     }
@@ -1370,6 +1369,34 @@ static void SMPMPVRenderUpdate(void *ctx) {
     NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
     if (!content.length || readError) { return NO; }
     return [content containsString:@"-->"];
+}
+
+- (BOOL)shiftSubtitleFileAtPath:(NSString *)path bySeconds:(double)offsetSeconds {
+    if (offsetSeconds <= 0) { return YES; }
+
+    NSError *readError = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if (!content.length || readError) { return NO; }
+
+    NSString *normalizedContent = [[content stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [normalizedContent componentsSeparatedByString:@"\n"];
+    NSMutableString *output = NSMutableString.string;
+    for (NSUInteger i = 0; i < lines.count; i++) {
+        NSString *line = lines[i];
+        double start = 0;
+        double end = 0;
+        if ([line containsString:@"-->"] && [self parseSRTTimeLine:line start:&start end:&end]) {
+            line = [NSString stringWithFormat:@"%@ --> %@",
+                    [self formatSRTTimestamp:start + offsetSeconds],
+                    [self formatSRTTimestamp:end + offsetSeconds]];
+        }
+        [output appendString:line];
+        if (i + 1 < lines.count) {
+            [output appendString:@"\n"];
+        }
+    }
+
+    return [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (double)mediaDurationAtPath:(NSString *)path ffprobe:(NSString *)ffprobe {
