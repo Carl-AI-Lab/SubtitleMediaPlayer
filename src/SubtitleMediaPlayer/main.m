@@ -5,6 +5,9 @@
 #include <mpv/render_gl.h>
 
 static const double SMPMaxVolume = 125.0;
+static const double SMPResumeMinimumPosition = 5.0;
+static const double SMPResumeEndThreshold = 10.0;
+static const double SMPPlaybackPositionSaveInterval = 5.0;
 
 static BOOL SMPIsVideoURL(NSURL *url) {
     if (!url.isFileURL) { return NO; }
@@ -187,6 +190,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, assign) BOOL subtitleGenerating;
 @property (nonatomic, assign) double duration;
 @property (nonatomic, assign) double position;
+@property (nonatomic, assign) double pendingResumePosition;
+@property (nonatomic, assign) BOOL hasPendingResumePosition;
+@property (nonatomic, assign) double lastPlaybackPositionSaveTime;
 @property (nonatomic, copy) NSString *currentVideoPath;
 @property (nonatomic, copy) NSString *currentSubtitlePath;
 @property (nonatomic, copy) NSString *pendingOpenPath;
@@ -288,6 +294,8 @@ static void SMPMPVRenderUpdate(void *ctx) {
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
     self.stopping = YES;
+    [self saveCurrentPlaybackPositionIfNeeded];
+    [self.defaults synchronize];
     if (self.keyEventMonitor) {
         [NSEvent removeMonitor:self.keyEventMonitor];
         self.keyEventMonitor = nil;
@@ -625,12 +633,20 @@ static void SMPMPVRenderUpdate(void *ctx) {
             [self refreshPlayButton];
             [self.videoView setNeedsDisplay:YES];
             self.statusLabel.stringValue = self.currentVideoPath.lastPathComponent ?: @"播放中";
+            [self applyPendingResumePositionIfNeeded];
             if (self.subtitleVisible) {
                 [self loadSidecarSubtitleIfAvailable];
             }
         });
     } else if (event->event_id == MPV_EVENT_END_FILE) {
+        mpv_event_end_file *endFile = (mpv_event_end_file *)event->data;
+        BOOL reachedEOF = endFile && endFile->reason == MPV_END_FILE_REASON_EOF;
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (reachedEOF) {
+                [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
+            } else {
+                [self saveCurrentPlaybackPositionIfNeeded];
+            }
             [self refreshPlayButton];
         });
     } else if (event->event_id == MPV_EVENT_SHUTDOWN) {
@@ -642,6 +658,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     if ([name isEqualToString:@"time-pos"]) {
         self.position = value;
         [self refreshTimeUI];
+        [self saveCurrentPlaybackPositionThrottled];
     } else if ([name isEqualToString:@"duration"]) {
         self.duration = value;
         self.progressSlider.maxValue = MAX(value, 1.0);
@@ -659,6 +676,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
 - (void)updateFlagProperty:(NSString *)name value:(BOOL)value {
     if ([name isEqualToString:@"pause"]) {
         self.paused = value;
+        if (value) {
+            [self saveCurrentPlaybackPositionIfNeeded];
+        }
         [self refreshPlayButton];
     } else if ([name isEqualToString:@"sub-visibility"]) {
         self.subtitleVisible = value;
@@ -893,10 +913,16 @@ static void SMPMPVRenderUpdate(void *ctx) {
         self.statusLabel.stringValue = @"视频不存在";
         return;
     }
+    [self saveCurrentPlaybackPositionIfNeeded];
     self.currentVideoPath = path;
     self.currentSubtitlePath = nil;
     self.duration = 0;
     self.position = 0;
+    self.hasPendingResumePosition = NO;
+    self.pendingResumePosition = [self savedPlaybackPositionForPath:path];
+    if (self.pendingResumePosition >= SMPResumeMinimumPosition) {
+        self.hasPendingResumePosition = YES;
+    }
     self.progressSlider.doubleValue = 0;
     self.progressSlider.maxValue = 1;
     self.statusLabel.stringValue = path.lastPathComponent;
@@ -935,6 +961,71 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.progressSlider.doubleValue = clamped;
     [self refreshTimeUI];
     [self command:@[@"seek", [NSString stringWithFormat:@"%.3f", clamped], @"absolute", @"exact"]];
+    [self saveCurrentPlaybackPositionIfNeeded];
+}
+
+- (NSString *)playbackPositionDefaultsKeyForPath:(NSString *)path {
+    if (!path.length) { return nil; }
+    return [@"playbackPosition:" stringByAppendingString:path.stringByStandardizingPath];
+}
+
+- (double)savedPlaybackPositionForPath:(NSString *)path {
+    NSString *key = [self playbackPositionDefaultsKeyForPath:path];
+    if (!key.length || ![self.defaults objectForKey:key]) { return 0; }
+    return [self.defaults doubleForKey:key];
+}
+
+- (void)saveCurrentPlaybackPositionThrottled {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (now - self.lastPlaybackPositionSaveTime < SMPPlaybackPositionSaveInterval) {
+        return;
+    }
+    self.lastPlaybackPositionSaveTime = now;
+    [self saveCurrentPlaybackPositionIfNeeded];
+}
+
+- (void)saveCurrentPlaybackPositionIfNeeded {
+    if (!self.currentVideoPath.length || self.hasPendingResumePosition) { return; }
+
+    BOOL nearEnd = self.duration > 30.0 && self.position >= self.duration - SMPResumeEndThreshold;
+    if (self.position < SMPResumeMinimumPosition || nearEnd) {
+        [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
+        return;
+    }
+
+    NSString *key = [self playbackPositionDefaultsKeyForPath:self.currentVideoPath];
+    if (!key.length) { return; }
+    [self.defaults setDouble:self.position forKey:key];
+}
+
+- (void)clearSavedPlaybackPositionForPath:(NSString *)path {
+    NSString *key = [self playbackPositionDefaultsKeyForPath:path];
+    if (!key.length) { return; }
+    [self.defaults removeObjectForKey:key];
+}
+
+- (void)applyPendingResumePositionIfNeeded {
+    if (!self.hasPendingResumePosition) { return; }
+
+    double target = self.pendingResumePosition;
+    self.hasPendingResumePosition = NO;
+    self.pendingResumePosition = 0;
+
+    BOOL nearEnd = self.duration > 30.0 && target >= self.duration - SMPResumeEndThreshold;
+    if (target < SMPResumeMinimumPosition || nearEnd) {
+        [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
+        return;
+    }
+
+    if (self.duration > 0) {
+        target = MIN(MAX(target, 0), self.duration);
+    }
+    self.position = target;
+    self.progressSlider.doubleValue = target;
+    [self refreshTimeUI];
+    [self command:@[@"seek", [NSString stringWithFormat:@"%.3f", target], @"absolute", @"exact"]];
+    [self saveCurrentPlaybackPositionIfNeeded];
+    self.statusLabel.stringValue = [NSString stringWithFormat:@"已恢复到 %@", [self formatSeconds:target]];
 }
 
 - (void)volumeChanged:(NSSlider *)sender {
