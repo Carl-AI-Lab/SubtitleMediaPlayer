@@ -1156,7 +1156,8 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
         double audioDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
         double videoDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
-        double transcriptionDuration = MAX(mediaDuration, MAX(audioDuration, videoDuration));
+        double transcriptionDuration = audioDuration > 0 ? audioDuration : MAX(mediaDuration, videoDuration);
+        double timelineOffset = MAX([self firstAudioStreamStartTimeAtPath:videoPath ffprobe:ffprobe], 0.0);
 
         NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
         int whisperStatus = [self transcribeAudioAtPath:audioPath
@@ -1165,7 +1166,8 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                 whisper:whisper
                                                  prompt:prompt
                                              outputBase:outputBase
-                                           mediaDuration:transcriptionDuration];
+                                           mediaDuration:transcriptionDuration
+                                          timelineOffset:timelineOffset];
         if (whisperStatus == -2) {
             [self finishSubtitleGenerationWithError:@"没有识别到语音" tempRoot:tempRoot];
             return;
@@ -1240,8 +1242,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
                      whisper:(NSString *)whisper
                       prompt:(NSString *)prompt
                   outputBase:(NSString *)outputBase
-               mediaDuration:(double)mediaDuration {
-    double chunkSeconds = 60.0;
+               mediaDuration:(double)mediaDuration
+              timelineOffset:(double)timelineOffset {
+    double chunkSeconds = 300.0;
+    double overlapSeconds = 15.0;
     if (mediaDuration <= chunkSeconds * 2.0) {
         int status = [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
                                                                            audioPath:audioPath
@@ -1251,14 +1255,22 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                                           durationMS:0]];
         if (status != 0) { return status; }
         NSString *srtPath = [outputBase stringByAppendingPathExtension:@"srt"];
+        if ([self subtitleFileHasUsableContentAtPath:srtPath] && timelineOffset > 0) {
+            if (![self shiftSubtitleFileAtPath:srtPath bySeconds:timelineOffset]) {
+                return -1;
+            }
+        }
         return [self subtitleFileHasUsableContentAtPath:srtPath] ? 0 : -2;
     }
 
     NSUInteger chunkCount = (NSUInteger)ceil(mediaDuration / chunkSeconds);
     NSMutableArray<NSString *> *chunkSRTs = NSMutableArray.array;
     for (NSUInteger index = 0; index < chunkCount; index++) {
-        double offsetSeconds = (double)index * chunkSeconds;
-        double durationSeconds = MIN(chunkSeconds, mediaDuration - offsetSeconds);
+        double coreStartSeconds = (double)index * chunkSeconds;
+        double coreEndSeconds = MIN(coreStartSeconds + chunkSeconds, mediaDuration);
+        double offsetSeconds = MAX(coreStartSeconds - overlapSeconds, 0.0);
+        double endSeconds = MIN(coreEndSeconds + overlapSeconds, mediaDuration);
+        double durationSeconds = endSeconds - offsetSeconds;
         if (durationSeconds <= 0) { continue; }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1296,10 +1308,18 @@ static void SMPMPVRenderUpdate(void *ctx) {
             return status;
         }
         if ([self subtitleFileHasUsableContentAtPath:chunkSRT]) {
-            if (![self shiftSubtitleFileAtPath:chunkSRT bySeconds:offsetSeconds]) {
+            double timelineShift = timelineOffset + offsetSeconds;
+            double keepStart = timelineOffset + coreStartSeconds;
+            double keepEnd = timelineOffset + coreEndSeconds;
+            if (![self shiftAndCropSubtitleFileAtPath:chunkSRT
+                                             bySeconds:timelineShift
+                                             keepStart:keepStart
+                                               keepEnd:keepEnd]) {
                 return -1;
             }
-            [chunkSRTs addObject:chunkSRT];
+            if ([self subtitleFileHasUsableContentAtPath:chunkSRT]) {
+                [chunkSRTs addObject:chunkSRT];
+            }
         }
     }
 
@@ -1399,6 +1419,70 @@ static void SMPMPVRenderUpdate(void *ctx) {
     return [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
+- (BOOL)shiftAndCropSubtitleFileAtPath:(NSString *)path
+                             bySeconds:(double)offsetSeconds
+                             keepStart:(double)keepStart
+                               keepEnd:(double)keepEnd {
+    NSError *readError = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
+    if (!content.length || readError) { return NO; }
+
+    NSString *normalizedContent = [[content stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"] stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [normalizedContent componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSArray<NSString *> *> *blocks = NSMutableArray.array;
+    NSMutableArray<NSString *> *current = NSMutableArray.array;
+    for (NSString *line in lines) {
+        if (line.length == 0) {
+            if (current.count > 0) {
+                [blocks addObject:current.copy];
+                [current removeAllObjects];
+            }
+        } else {
+            [current addObject:line];
+        }
+    }
+    if (current.count > 0) {
+        [blocks addObject:current.copy];
+    }
+
+    NSMutableString *output = NSMutableString.string;
+    NSUInteger sequence = 1;
+    for (NSArray<NSString *> *blockLines in blocks) {
+        NSUInteger timeIndex = NSNotFound;
+        for (NSUInteger i = 0; i < blockLines.count; i++) {
+            if ([blockLines[i] containsString:@"-->"]) {
+                timeIndex = i;
+                break;
+            }
+        }
+        if (timeIndex == NSNotFound || timeIndex + 1 >= blockLines.count) { continue; }
+
+        double start = 0;
+        double end = 0;
+        if (![self parseSRTTimeLine:blockLines[timeIndex] start:&start end:&end]) { continue; }
+
+        start += offsetSeconds;
+        end += offsetSeconds;
+        double midpoint = (start + end) / 2.0;
+        if (midpoint < keepStart || midpoint >= keepEnd) { continue; }
+
+        start = MAX(start, keepStart);
+        end = MIN(end, keepEnd);
+        if (end <= start) {
+            end = start + 0.2;
+        }
+
+        NSArray<NSString *> *textLines = [blockLines subarrayWithRange:NSMakeRange(timeIndex + 1, blockLines.count - timeIndex - 1)];
+        [output appendFormat:@"%lu\n%@ --> %@\n%@\n\n",
+         (unsigned long)sequence++,
+         [self formatSRTTimestamp:start],
+         [self formatSRTTimestamp:end],
+         [textLines componentsJoinedByString:@"\n"]];
+    }
+
+    return [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
+
 - (double)mediaDurationAtPath:(NSString *)path ffprobe:(NSString *)ffprobe {
     if (!path.length || !ffprobe.length) { return 0; }
 
@@ -1407,6 +1491,35 @@ static void SMPMPVRenderUpdate(void *ctx) {
     task.arguments = @[
         @"-v", @"error",
         @"-show_entries", @"format=duration",
+        @"-of", @"default=noprint_wrappers=1:nokey=1",
+        path
+    ];
+    NSPipe *pipe = [NSPipe pipe];
+    task.standardOutput = pipe;
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+
+    NSError *error = nil;
+    if (![task launchAndReturnError:&error]) {
+        NSLog(@"SubtitleMediaPlayer: ffprobe failed to launch: %@", error.localizedDescription);
+        return 0;
+    }
+    [task waitUntilExit];
+    NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+    if (task.terminationStatus != 0 || data.length == 0) { return 0; }
+
+    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return output.doubleValue;
+}
+
+- (double)firstAudioStreamStartTimeAtPath:(NSString *)path ffprobe:(NSString *)ffprobe {
+    if (!path.length || !ffprobe.length) { return 0; }
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:ffprobe];
+    task.arguments = @[
+        @"-v", @"error",
+        @"-select_streams", @"a:0",
+        @"-show_entries", @"stream=start_time",
         @"-of", @"default=noprint_wrappers=1:nokey=1",
         path
     ];
