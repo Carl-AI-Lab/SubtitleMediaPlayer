@@ -39,6 +39,12 @@ if ! command -v opencc >/dev/null 2>&1; then
   brew install opencc
 fi
 
+# Catch broken Homebrew dependency links before producing an app that cannot launch.
+if ! brew linkage --test mpv >/dev/null 2>&1; then
+  echo "broken Homebrew mpv dependencies; run: brew reinstall ffmpeg mpv" >&2
+  exit 1
+fi
+
 mkdir -p "$MODEL_DIR"
 if [[ "${SUBTITLEMEDIAPLAYER_SKIP_MODEL_DOWNLOAD:-0}" != "1" && ! -f "$MODEL_PATH" ]]; then
   echo "Downloading whisper model: $MODEL_NAME"
@@ -68,7 +74,8 @@ clang -fobjc-arc -ObjC -std=gnu11 -Wall -Wextra -Wno-deprecated-declarations \
 if [[ -f "$MODEL_PATH" ]]; then
   cp "$MODEL_PATH" "$RESOURCES/models/$MODEL_NAME"
   mkdir -p "$APP_SUPPORT_MODEL_DIR"
-  cp "$MODEL_PATH" "$APP_SUPPORT_MODEL_DIR/$MODEL_NAME"
+  cp "$MODEL_PATH" "$APP_SUPPORT_MODEL_DIR/$MODEL_NAME" 2>/dev/null || \
+    echo "warning: could not update the cached model under Application Support; bundled model is available" >&2
 fi
 
 SIGN_IDENTITY="${SUBTITLEMEDIAPLAYER_CODE_SIGN_IDENTITY:-}"
@@ -85,8 +92,11 @@ xattr -cr "$APP" 2>/dev/null || true
 
 rm -f "$ROOT/dist/SubtitleMediaPlayer.dmg"
 if command -v hdiutil >/dev/null 2>&1; then
-  hdiutil create -volname SubtitleMediaPlayer -srcfolder "$APP" -ov -format UDZO "$ROOT/dist/SubtitleMediaPlayer.dmg" >/dev/null
-  xattr -c "$ROOT/dist/SubtitleMediaPlayer.dmg" 2>/dev/null || true
+  if hdiutil create -volname SubtitleMediaPlayer -srcfolder "$APP" -ov -format UDZO "$ROOT/dist/SubtitleMediaPlayer.dmg" >/dev/null 2>&1; then
+    xattr -c "$ROOT/dist/SubtitleMediaPlayer.dmg" 2>/dev/null || true
+  else
+    echo "warning: DMG creation failed in this environment; the .app was built successfully" >&2
+  fi
 fi
 
 echo "Built: $APP"

@@ -166,9 +166,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, SMPVideoDropDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, SMPVideoDropDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) SMPMPVView *videoView;
+@property (nonatomic, strong) NSTableView *playlistTable;
+@property (nonatomic, strong) NSTextField *playlistTitleLabel;
 @property (nonatomic, strong) NSButton *playButton;
 @property (nonatomic, strong) NSSlider *progressSlider;
 @property (nonatomic, strong) NSSlider *volumeSlider;
@@ -197,6 +199,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, copy) NSString *currentSubtitlePath;
 @property (nonatomic, copy) NSString *pendingOpenPath;
 @property (nonatomic, strong) NSURL *pendingOpenURL;
+@property (nonatomic, strong) NSArray<NSString *> *playlistPaths;
 @property (nonatomic, strong) NSUserDefaults *defaults;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *folderBookmarks;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURL *> *activeFolderAccessURLs;
@@ -386,7 +389,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 }
 
 - (void)buildWindow {
-    NSRect frame = NSMakeRect(0, 0, 960, 600);
+    NSRect frame = NSMakeRect(0, 0, 1200, 700);
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                               styleMask:(NSWindowStyleMaskTitled |
                                                          NSWindowStyleMaskClosable |
@@ -395,7 +398,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
     self.window.title = @"SubtitleMediaPlayer";
-    self.window.minSize = NSMakeSize(720, 420);
+    self.window.minSize = NSMakeSize(900, 420);
     self.window.delegate = self;
     self.window.backgroundColor = NSColor.blackColor;
     [self.window center];
@@ -405,16 +408,28 @@ static void SMPMPVRenderUpdate(void *ctx) {
     content.layer.backgroundColor = NSColor.blackColor.CGColor;
     self.paused = YES;
 
+    NSView *playerArea = [[NSView alloc] initWithFrame:NSZeroRect];
+    playerArea.translatesAutoresizingMaskIntoConstraints = NO;
+    playerArea.wantsLayer = YES;
+    playerArea.layer.backgroundColor = NSColor.blackColor.CGColor;
+    [content addSubview:playerArea];
+
+    NSView *playlistPanel = [[NSView alloc] initWithFrame:NSZeroRect];
+    playlistPanel.translatesAutoresizingMaskIntoConstraints = NO;
+    playlistPanel.wantsLayer = YES;
+    playlistPanel.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.12 alpha:1.0].CGColor;
+    [content addSubview:playlistPanel];
+
     self.videoView = [[SMPMPVView alloc] initWithFrame:NSZeroRect];
     self.videoView.dropDelegate = self;
     self.videoView.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:self.videoView];
+    [playerArea addSubview:self.videoView];
 
     NSView *controls = [[NSView alloc] initWithFrame:NSZeroRect];
     controls.translatesAutoresizingMaskIntoConstraints = NO;
     controls.wantsLayer = YES;
     controls.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.09 alpha:1.0].CGColor;
-    [content addSubview:controls];
+    [playerArea addSubview:controls];
 
     self.progressSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     self.progressSlider.minValue = 0;
@@ -475,10 +490,48 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [controls addSubview:self.statusLabel];
 
-    NSDictionary *views = @{@"video": self.videoView, @"controls": controls};
-    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[video]|" options:0 metrics:nil views:views]];
-    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[controls]|" options:0 metrics:nil views:views]];
-    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[video][controls(72)]|" options:0 metrics:nil views:views]];
+    self.playlistTitleLabel = [self labelWithText:@"播放列表"];
+    self.playlistTitleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    [playlistPanel addSubview:self.playlistTitleLabel];
+
+    self.playlistTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    self.playlistTable.headerView = nil;
+    self.playlistTable.rowHeight = 34;
+    self.playlistTable.intercellSpacing = NSMakeSize(0, 1);
+    self.playlistTable.backgroundColor = [NSColor colorWithCalibratedWhite:0.12 alpha:1.0];
+    self.playlistTable.usesAlternatingRowBackgroundColors = YES;
+    self.playlistTable.dataSource = self;
+    self.playlistTable.delegate = self;
+    NSTableColumn *playlistColumn = [[NSTableColumn alloc] initWithIdentifier:@"video"];
+    playlistColumn.resizingMask = NSTableColumnAutoresizingMask;
+    [self.playlistTable addTableColumn:playlistColumn];
+    NSScrollView *playlistScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    playlistScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    playlistScrollView.hasVerticalScroller = YES;
+    playlistScrollView.borderType = NSNoBorder;
+    playlistScrollView.drawsBackground = NO;
+    playlistScrollView.documentView = self.playlistTable;
+    [playlistPanel addSubview:playlistScrollView];
+
+    NSDictionary *views = @{@"player": playerArea, @"playlist": playlistPanel};
+    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[player][playlist(240)]|" options:0 metrics:nil views:views]];
+    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[player]|" options:0 metrics:nil views:views]];
+    [content addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[playlist]|" options:0 metrics:nil views:views]];
+
+    NSDictionary *playerViews = @{@"video": self.videoView, @"controls": controls};
+    [playerArea addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[video]|" options:0 metrics:nil views:playerViews]];
+    [playerArea addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[controls]|" options:0 metrics:nil views:playerViews]];
+    [playerArea addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"V:|[video][controls(72)]|" options:0 metrics:nil views:playerViews]];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.playlistTitleLabel.leadingAnchor constraintEqualToAnchor:playlistPanel.leadingAnchor constant:12],
+        [self.playlistTitleLabel.trailingAnchor constraintEqualToAnchor:playlistPanel.trailingAnchor constant:-12],
+        [self.playlistTitleLabel.topAnchor constraintEqualToAnchor:playlistPanel.topAnchor constant:12],
+        [playlistScrollView.leadingAnchor constraintEqualToAnchor:playlistPanel.leadingAnchor],
+        [playlistScrollView.trailingAnchor constraintEqualToAnchor:playlistPanel.trailingAnchor],
+        [playlistScrollView.topAnchor constraintEqualToAnchor:self.playlistTitleLabel.bottomAnchor constant:8],
+        [playlistScrollView.bottomAnchor constraintEqualToAnchor:playlistPanel.bottomAnchor]
+    ]];
 
     [NSLayoutConstraint activateConstraints:@[
         [self.progressSlider.leadingAnchor constraintEqualToAnchor:controls.leadingAnchor constant:14],
@@ -644,6 +697,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (reachedEOF) {
                 [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
+                NSString *nextPath = [self nextPlaylistPathAfterCurrentVideo];
+                if (nextPath.length) {
+                    [self openVideoAtPath:nextPath];
+                    return;
+                }
             } else {
                 [self saveCurrentPlaybackPositionIfNeeded];
             }
@@ -927,12 +985,92 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.progressSlider.maxValue = 1;
     self.statusLabel.stringValue = path.lastPathComponent;
     self.window.title = [NSString stringWithFormat:@"SubtitleMediaPlayer - %@", path.lastPathComponent];
+    [self reloadPlaylistForVideoPath:path];
     [self command:@[@"loadfile", path, @"replace"]];
     [self applyVolumeFromSliderValue:self.volumeSlider.doubleValue];
     [self setDoubleProperty:"speed" value:[self selectedSpeed]];
     [self setFlagProperty:"pause" value:NO];
     self.paused = NO;
     [self refreshPlayButton];
+}
+
+- (void)reloadPlaylistForVideoPath:(NSString *)path {
+    NSString *directory = path.stringByDeletingLastPathComponent;
+    NSError *error = nil;
+    NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:&error];
+    if (!names) {
+        self.playlistPaths = @[];
+        [self.playlistTable reloadData];
+        self.playlistTitleLabel.stringValue = @"播放列表";
+        return;
+    }
+
+    NSMutableArray<NSString *> *paths = NSMutableArray.array;
+    for (NSString *name in names) {
+        NSString *candidate = [directory stringByAppendingPathComponent:name];
+        if (SMPIsVideoURL([NSURL fileURLWithPath:candidate])) {
+            [paths addObject:candidate];
+        }
+    }
+    [paths sortUsingComparator:^NSComparisonResult(NSString *left, NSString *right) {
+        return [left.lastPathComponent localizedStandardCompare:right.lastPathComponent];
+    }];
+    self.playlistPaths = paths.copy;
+    self.playlistTitleLabel.stringValue = [NSString stringWithFormat:@"播放列表 · %lu", (unsigned long)self.playlistPaths.count];
+    [self.playlistTable reloadData];
+
+    NSUInteger index = [self.playlistPaths indexOfObject:path];
+    if (index != NSNotFound) {
+        [self.playlistTable selectRowIndexes:[NSIndexSet indexSetWithIndex:index] byExtendingSelection:NO];
+        [self.playlistTable scrollRowToVisible:(NSInteger)index];
+    }
+}
+
+- (NSString *)nextPlaylistPathAfterCurrentVideo {
+    if (!self.currentVideoPath.length || self.playlistPaths.count == 0) { return nil; }
+    NSUInteger currentIndex = [self.playlistPaths indexOfObject:self.currentVideoPath];
+    if (currentIndex == NSNotFound || currentIndex + 1 >= self.playlistPaths.count) { return nil; }
+    return self.playlistPaths[currentIndex + 1];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    (void)tableView;
+    return self.playlistPaths.count;
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    (void)tableColumn;
+    if (row < 0 || row >= (NSInteger)self.playlistPaths.count) { return nil; }
+    NSString *identifier = @"PlaylistCell";
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSZeroRect];
+        cell.identifier = identifier;
+        NSTextField *label = [NSTextField labelWithString:@""];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.textColor = [NSColor colorWithCalibratedWhite:0.88 alpha:1.0];
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.font = [NSFont systemFontOfSize:12];
+        [cell addSubview:label];
+        cell.textField = label;
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:12],
+            [label.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-8],
+            [label.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor]
+        ]];
+    }
+    cell.textField.stringValue = self.playlistPaths[(NSUInteger)row].lastPathComponent;
+    return cell;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    NSTableView *tableView = notification.object;
+    NSInteger row = tableView.selectedRow;
+    if (row < 0 || row >= (NSInteger)self.playlistPaths.count) { return; }
+    NSString *path = self.playlistPaths[(NSUInteger)row];
+    if (![path isEqualToString:self.currentVideoPath]) {
+        [self openVideoAtPath:path];
+    }
 }
 
 - (void)togglePlay:(id)sender {
