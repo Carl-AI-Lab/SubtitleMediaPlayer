@@ -195,6 +195,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, assign) BOOL subtitleBatchGenerating;
 @property (nonatomic, assign) BOOL subtitleCancellationRequested;
 @property (nonatomic, strong) NSTask *activeSubtitleTask;
+@property (nonatomic, strong) NSArray<NSString *> *batchSubtitlePaths;
+@property (nonatomic, assign) NSUInteger batchSubtitleCurrentIndex;
+@property (nonatomic, assign) NSUInteger batchSubtitleCompletedCount;
+@property (nonatomic, assign) NSUInteger batchSubtitleFailedCount;
 @property (nonatomic, assign) BOOL autoplayEnabled;
 @property (nonatomic, assign) double duration;
 @property (nonatomic, assign) double position;
@@ -712,18 +716,18 @@ static void SMPMPVRenderUpdate(void *ctx) {
             [self.videoView setNeedsDisplay:YES];
             self.statusLabel.stringValue = self.currentVideoPath.lastPathComponent ?: @"播放中";
             [self applyPendingResumePositionIfNeeded];
-            if (self.subtitleVisible) {
-                [self loadSidecarSubtitleIfAvailable];
-            }
+            [self loadSidecarSubtitleIfAvailable];
         });
     } else if (event->event_id == MPV_EVENT_END_FILE) {
         mpv_event_end_file *endFile = (mpv_event_end_file *)event->data;
         BOOL reachedEOF = endFile && endFile->reason == MPV_END_FILE_REASON_EOF;
+        NSString *endedPath = self.currentVideoPath.copy;
+        NSArray<NSString *> *endedPlaylistPaths = self.playlistPaths.copy;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (reachedEOF) {
-                [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
-                NSString *nextPath = self.autoplayEnabled ? [self nextPlaylistPathAfterCurrentVideo] : nil;
-                if (nextPath.length) {
+                [self clearSavedPlaybackPositionForPath:endedPath];
+                NSString *nextPath = self.autoplayEnabled ? [self nextPlaylistPathAfterVideoPath:endedPath inPaths:endedPlaylistPaths] : nil;
+                if (nextPath.length && [self.currentVideoPath isEqualToString:endedPath]) {
                     [self openVideoAtPath:nextPath];
                     return;
                 }
@@ -1051,11 +1055,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
     }
 }
 
-- (NSString *)nextPlaylistPathAfterCurrentVideo {
-    if (!self.currentVideoPath.length || self.playlistPaths.count == 0) { return nil; }
-    NSUInteger currentIndex = [self.playlistPaths indexOfObject:self.currentVideoPath];
-    if (currentIndex == NSNotFound || currentIndex + 1 >= self.playlistPaths.count) { return nil; }
-    return self.playlistPaths[currentIndex + 1];
+- (NSString *)nextPlaylistPathAfterVideoPath:(NSString *)videoPath inPaths:(NSArray<NSString *> *)paths {
+    if (!videoPath.length || paths.count == 0) { return nil; }
+    NSUInteger currentIndex = [paths indexOfObject:videoPath];
+    if (currentIndex == NSNotFound || currentIndex + 1 >= paths.count) { return nil; }
+    return paths[currentIndex + 1];
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
@@ -1241,7 +1245,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 - (void)loadSidecarSubtitleIfAvailable {
     NSString *sidecar = [self sidecarSubtitleForVideo:self.currentVideoPath];
     if (sidecar) {
-        [self loadSubtitleAtPath:sidecar show:YES];
+        [self loadSubtitleAtPath:sidecar show:self.subtitleVisible];
     }
 }
 
@@ -1377,8 +1381,12 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.subtitleGenerating = YES;
     self.subtitleBatchGenerating = YES;
     self.subtitleCancellationRequested = NO;
+    self.batchSubtitlePaths = paths;
+    self.batchSubtitleCurrentIndex = 0;
+    self.batchSubtitleCompletedCount = 0;
+    self.batchSubtitleFailedCount = 0;
     self.autoSubtitleButton.enabled = NO;
-    self.batchSubtitleButton.title = @"取消识别";
+    self.batchSubtitleButton.title = [NSString stringWithFormat:@"取消识别 0/%lu", (unsigned long)paths.count];
 
     dispatch_async(self.subtitleQueue, ^{
         NSUInteger completed = 0;
@@ -1387,6 +1395,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
             if ([self isSubtitleCancellationRequested]) { break; }
             NSString *videoPath = paths[index];
             dispatch_async(dispatch_get_main_queue(), ^{
+                self.batchSubtitleCurrentIndex = index + 1;
+                self.batchSubtitleButton.title = [NSString stringWithFormat:@"取消识别 %lu/%lu",
+                                                  (unsigned long)(index + 1),
+                                                  (unsigned long)self.batchSubtitlePaths.count];
                 self.statusLabel.stringValue = [NSString stringWithFormat:@"文件夹识别 %lu/%lu：%@",
                                                 (unsigned long)(index + 1),
                                                 (unsigned long)paths.count,
@@ -1402,7 +1414,20 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                        ffprobe:ffprobe
                                                        whisper:whisper];
             if (result == -3 || [self isSubtitleCancellationRequested]) { break; }
-            if (result == 0) { completed++; } else { failed++; }
+            if (result == 0) {
+                completed++;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.batchSubtitleCompletedCount = completed;
+                    if ([self.currentVideoPath isEqualToString:videoPath]) {
+                        [self loadSubtitleAtPath:targetSRT show:YES];
+                    }
+                });
+            } else {
+                failed++;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.batchSubtitleFailedCount = failed;
+                });
+            }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1410,6 +1435,9 @@ static void SMPMPVRenderUpdate(void *ctx) {
             self.subtitleGenerating = NO;
             self.subtitleBatchGenerating = NO;
             self.subtitleCancellationRequested = NO;
+            self.batchSubtitleCurrentIndex = paths.count;
+            self.batchSubtitleCompletedCount = completed;
+            self.batchSubtitleFailedCount = failed;
             self.autoSubtitleButton.enabled = YES;
             self.batchSubtitleButton.enabled = YES;
             self.batchSubtitleButton.title = @"识别当前文件夹";
