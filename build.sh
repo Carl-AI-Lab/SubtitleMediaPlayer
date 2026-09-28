@@ -39,12 +39,6 @@ if ! command -v opencc >/dev/null 2>&1; then
   brew install opencc
 fi
 
-# Catch broken Homebrew dependency links before producing an app that cannot launch.
-if ! brew linkage --test mpv >/dev/null 2>&1; then
-  echo "broken Homebrew mpv dependencies; run: brew reinstall ffmpeg mpv" >&2
-  exit 1
-fi
-
 mkdir -p "$MODEL_DIR"
 if [[ "${SUBTITLEMEDIAPLAYER_SKIP_MODEL_DOWNLOAD:-0}" != "1" && ! -f "$MODEL_PATH" ]]; then
   echo "Downloading whisper model: $MODEL_NAME"

@@ -171,6 +171,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, strong) SMPMPVView *videoView;
 @property (nonatomic, strong) NSTableView *playlistTable;
 @property (nonatomic, strong) NSTextField *playlistTitleLabel;
+@property (nonatomic, strong) NSButton *autoplayButton;
 @property (nonatomic, strong) NSButton *playButton;
 @property (nonatomic, strong) NSSlider *progressSlider;
 @property (nonatomic, strong) NSSlider *volumeSlider;
@@ -178,6 +179,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, strong) NSButton *subtitleButton;
 @property (nonatomic, strong) NSButton *manualSubtitleButton;
 @property (nonatomic, strong) NSButton *autoSubtitleButton;
+@property (nonatomic, strong) NSButton *batchSubtitleButton;
 @property (nonatomic, strong) NSTextField *timeLabel;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSTimer *redrawTimer;
@@ -190,6 +192,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
 @property (nonatomic, assign) BOOL updatingSlider;
 @property (nonatomic, assign) BOOL subtitleVisible;
 @property (nonatomic, assign) BOOL subtitleGenerating;
+@property (nonatomic, assign) BOOL subtitleBatchGenerating;
+@property (nonatomic, assign) BOOL subtitleCancellationRequested;
+@property (nonatomic, strong) NSTask *activeSubtitleTask;
+@property (nonatomic, assign) BOOL autoplayEnabled;
 @property (nonatomic, assign) double duration;
 @property (nonatomic, assign) double position;
 @property (nonatomic, assign) double pendingResumePosition;
@@ -322,9 +328,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
     [self.defaults registerDefaults:@{
         @"volume": @80.0,
         @"speed": @1.0,
-        @"subtitlesEnabled": @NO
+        @"subtitlesEnabled": @NO,
+        @"autoplayEnabled": @YES
     }];
     self.subtitleVisible = [self.defaults boolForKey:@"subtitlesEnabled"];
+    self.autoplayEnabled = [self.defaults boolForKey:@"autoplayEnabled"];
     self.folderBookmarks = NSMutableDictionary.dictionary;
     NSDictionary<NSString *, NSData *> *fileBookmarks = [NSDictionary dictionaryWithContentsOfFile:[self folderBookmarksPath]];
     if (fileBookmarks) {
@@ -446,7 +454,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     [controls addSubview:self.playButton];
 
     self.speedPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    for (NSNumber *speed in @[@0.75, @1.0, @1.25, @1.5, @2.0, @3.0]) {
+    for (NSNumber *speed in @[@0.75, @1.0, @1.25, @1.5, @2.0, @3.0, @4.0]) {
         NSString *title = [NSString stringWithFormat:@"%@x", speed.stringValue];
         [self.speedPopup addItemWithTitle:title];
         self.speedPopup.lastItem.representedObject = speed;
@@ -483,6 +491,12 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.autoSubtitleButton.translatesAutoresizingMaskIntoConstraints = NO;
     [controls addSubview:self.autoSubtitleButton];
 
+    self.batchSubtitleButton = [NSButton buttonWithTitle:@"识别当前文件夹" target:self action:@selector(recognizeFolderSubtitles:)];
+    self.batchSubtitleButton.bezelStyle = NSBezelStyleTexturedRounded;
+    self.batchSubtitleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.batchSubtitleButton.toolTip = @"识别当前文件夹内所有视频的字幕；识别中再次点击可取消";
+    [controls addSubview:self.batchSubtitleButton];
+
     self.timeLabel = [self labelWithText:@"00:00 / 00:00"];
     [controls addSubview:self.timeLabel];
 
@@ -493,6 +507,11 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.playlistTitleLabel = [self labelWithText:@"播放列表"];
     self.playlistTitleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     [playlistPanel addSubview:self.playlistTitleLabel];
+
+    self.autoplayButton = [NSButton checkboxWithTitle:@"自动连播" target:self action:@selector(autoplayChanged:)];
+    self.autoplayButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.autoplayButton.state = self.autoplayEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [playlistPanel addSubview:self.autoplayButton];
 
     self.playlistTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
     self.playlistTable.headerView = nil;
@@ -525,8 +544,10 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
     [NSLayoutConstraint activateConstraints:@[
         [self.playlistTitleLabel.leadingAnchor constraintEqualToAnchor:playlistPanel.leadingAnchor constant:12],
-        [self.playlistTitleLabel.trailingAnchor constraintEqualToAnchor:playlistPanel.trailingAnchor constant:-12],
+        [self.playlistTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.autoplayButton.leadingAnchor constant:-8],
         [self.playlistTitleLabel.topAnchor constraintEqualToAnchor:playlistPanel.topAnchor constant:12],
+        [self.autoplayButton.trailingAnchor constraintEqualToAnchor:playlistPanel.trailingAnchor constant:-12],
+        [self.autoplayButton.centerYAnchor constraintEqualToAnchor:self.playlistTitleLabel.centerYAnchor],
         [playlistScrollView.leadingAnchor constraintEqualToAnchor:playlistPanel.leadingAnchor],
         [playlistScrollView.trailingAnchor constraintEqualToAnchor:playlistPanel.trailingAnchor],
         [playlistScrollView.topAnchor constraintEqualToAnchor:self.playlistTitleLabel.bottomAnchor constant:8],
@@ -560,11 +581,15 @@ static void SMPMPVRenderUpdate(void *ctx) {
 
         [self.autoSubtitleButton.leadingAnchor constraintEqualToAnchor:self.manualSubtitleButton.trailingAnchor constant:8],
         [self.autoSubtitleButton.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
-        [self.autoSubtitleButton.widthAnchor constraintEqualToConstant:132],
+        [self.autoSubtitleButton.widthAnchor constraintEqualToConstant:120],
 
-        [self.timeLabel.leadingAnchor constraintEqualToAnchor:self.autoSubtitleButton.trailingAnchor constant:12],
+        [self.batchSubtitleButton.leadingAnchor constraintEqualToAnchor:self.autoSubtitleButton.trailingAnchor constant:8],
+        [self.batchSubtitleButton.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
+        [self.batchSubtitleButton.widthAnchor constraintEqualToConstant:112],
+
+        [self.timeLabel.leadingAnchor constraintEqualToAnchor:self.batchSubtitleButton.trailingAnchor constant:10],
         [self.timeLabel.centerYAnchor constraintEqualToAnchor:self.playButton.centerYAnchor],
-        [self.timeLabel.widthAnchor constraintEqualToConstant:116],
+        [self.timeLabel.widthAnchor constraintEqualToConstant:104],
 
         [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.timeLabel.trailingAnchor constant:10],
         [self.statusLabel.trailingAnchor constraintEqualToAnchor:controls.trailingAnchor constant:-14],
@@ -697,7 +722,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (reachedEOF) {
                 [self clearSavedPlaybackPositionForPath:self.currentVideoPath];
-                NSString *nextPath = [self nextPlaylistPathAfterCurrentVideo];
+                NSString *nextPath = self.autoplayEnabled ? [self nextPlaylistPathAfterCurrentVideo] : nil;
                 if (nextPath.length) {
                     [self openVideoAtPath:nextPath];
                     return;
@@ -1183,6 +1208,12 @@ static void SMPMPVRenderUpdate(void *ctx) {
     [self setDoubleProperty:"speed" value:speed];
 }
 
+- (void)autoplayChanged:(NSButton *)sender {
+    self.autoplayEnabled = sender.state == NSControlStateValueOn;
+    [self.defaults setBool:self.autoplayEnabled forKey:@"autoplayEnabled"];
+    self.statusLabel.stringValue = self.autoplayEnabled ? @"自动连播已开启" : @"自动连播已关闭";
+}
+
 - (void)toggleSubtitle:(id)sender {
     (void)sender;
     if (!self.currentVideoPath) {
@@ -1240,6 +1271,22 @@ static void SMPMPVRenderUpdate(void *ctx) {
     self.statusLabel.stringValue = show ? @"字幕已加载" : @"字幕已加载但隐藏";
 }
 
+- (BOOL)isSubtitleCancellationRequested {
+    @synchronized (self) {
+        return self.subtitleCancellationRequested;
+    }
+}
+
+- (void)cancelSubtitleGeneration {
+    @synchronized (self) {
+        self.subtitleCancellationRequested = YES;
+        if (self.activeSubtitleTask.isRunning) {
+            [self.activeSubtitleTask terminate];
+        }
+    }
+    self.statusLabel.stringValue = @"正在取消字幕识别...";
+}
+
 - (void)generateSubtitle:(id)sender {
     (void)sender;
     if (!self.currentVideoPath) {
@@ -1248,92 +1295,175 @@ static void SMPMPVRenderUpdate(void *ctx) {
     }
     if (self.subtitleGenerating) { return; }
     NSString *model = [self findWhisperModel];
+    NSString *ffmpeg = [self executablePath:@"ffmpeg"];
+    NSString *ffprobe = [self executablePath:@"ffprobe"];
+    NSString *whisper = [self executablePath:@"whisper-cli"];
     if (!model) {
         self.statusLabel.stringValue = @"缺少 whisper 模型";
         return;
     }
-    NSString *ffmpeg = [self executablePath:@"ffmpeg"];
-    NSString *ffprobe = [self executablePath:@"ffprobe"];
-    NSString *whisper = [self executablePath:@"whisper-cli"];
     if (!ffmpeg || !ffprobe || !whisper) {
         self.statusLabel.stringValue = @"缺少 ffmpeg/ffprobe 或 whisper-cli";
         return;
     }
 
-    self.subtitleGenerating = YES;
-    self.autoSubtitleButton.enabled = NO;
-    self.statusLabel.stringValue = @"生成中：抽音频";
-
     NSString *videoPath = self.currentVideoPath.copy;
+    NSString *targetSRT = [[videoPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"srt"];
     double mediaDuration = self.duration;
     [self startAccessForDirectoryOfFilePath:videoPath];
-    NSString *targetSRT = [[videoPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"srt"];
+    self.subtitleGenerating = YES;
+    self.subtitleCancellationRequested = NO;
+    self.autoSubtitleButton.enabled = NO;
+    self.batchSubtitleButton.enabled = NO;
+
+    dispatch_async(self.subtitleQueue, ^{
+        int result = [self generateSubtitleFileForVideoPath:videoPath
+                                                  targetSRT:targetSRT
+                                             mediaDuration:mediaDuration
+                                                     model:model
+                                                    ffmpeg:ffmpeg
+                                                   ffprobe:ffprobe
+                                                   whisper:whisper];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.subtitleGenerating = NO;
+            self.autoSubtitleButton.enabled = YES;
+            self.batchSubtitleButton.enabled = YES;
+            BOOL cancelled = result == -3 || [self isSubtitleCancellationRequested];
+            self.subtitleCancellationRequested = NO;
+            if (cancelled) {
+                self.statusLabel.stringValue = @"字幕识别已取消";
+            } else if (result == 0) {
+                self.statusLabel.stringValue = @"字幕生成完成";
+                [self loadSubtitleAtPath:targetSRT show:YES];
+            } else if (result == -2) {
+                self.statusLabel.stringValue = @"没有识别到语音";
+            } else {
+                self.statusLabel.stringValue = @"识别字幕失败";
+            }
+        });
+    });
+}
+
+- (void)recognizeFolderSubtitles:(id)sender {
+    (void)sender;
+    if (!self.currentVideoPath) {
+        self.statusLabel.stringValue = @"请先打开视频";
+        return;
+    }
+    if (self.subtitleBatchGenerating) {
+        [self cancelSubtitleGeneration];
+        return;
+    }
+    if (self.subtitleGenerating) { return; }
+
+    NSString *model = [self findWhisperModel];
+    NSString *ffmpeg = [self executablePath:@"ffmpeg"];
+    NSString *ffprobe = [self executablePath:@"ffprobe"];
+    NSString *whisper = [self executablePath:@"whisper-cli"];
+    if (!model) {
+        self.statusLabel.stringValue = @"缺少 whisper 模型";
+        return;
+    }
+    if (!ffmpeg || !ffprobe || !whisper) {
+        self.statusLabel.stringValue = @"缺少 ffmpeg/ffprobe 或 whisper-cli";
+        return;
+    }
+
+    NSArray<NSString *> *paths = self.playlistPaths.copy;
+    if (paths.count == 0) {
+        self.statusLabel.stringValue = @"当前文件夹没有视频";
+        return;
+    }
+    self.subtitleGenerating = YES;
+    self.subtitleBatchGenerating = YES;
+    self.subtitleCancellationRequested = NO;
+    self.autoSubtitleButton.enabled = NO;
+    self.batchSubtitleButton.title = @"取消识别";
+
+    dispatch_async(self.subtitleQueue, ^{
+        NSUInteger completed = 0;
+        NSUInteger failed = 0;
+        for (NSUInteger index = 0; index < paths.count; index++) {
+            if ([self isSubtitleCancellationRequested]) { break; }
+            NSString *videoPath = paths[index];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"文件夹识别 %lu/%lu：%@",
+                                                (unsigned long)(index + 1),
+                                                (unsigned long)paths.count,
+                                                videoPath.lastPathComponent];
+            });
+            double duration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
+            NSString *targetSRT = [[videoPath stringByDeletingPathExtension] stringByAppendingPathExtension:@"srt"];
+            int result = [self generateSubtitleFileForVideoPath:videoPath
+                                                      targetSRT:targetSRT
+                                                 mediaDuration:duration
+                                                         model:model
+                                                        ffmpeg:ffmpeg
+                                                       ffprobe:ffprobe
+                                                       whisper:whisper];
+            if (result == -3 || [self isSubtitleCancellationRequested]) { break; }
+            if (result == 0) { completed++; } else { failed++; }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL cancelled = [self isSubtitleCancellationRequested];
+            self.subtitleGenerating = NO;
+            self.subtitleBatchGenerating = NO;
+            self.subtitleCancellationRequested = NO;
+            self.autoSubtitleButton.enabled = YES;
+            self.batchSubtitleButton.enabled = YES;
+            self.batchSubtitleButton.title = @"识别当前文件夹";
+            if (cancelled) {
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"已取消：完成 %lu 个，失败 %lu 个",
+                                                (unsigned long)completed, (unsigned long)failed];
+            } else {
+                self.statusLabel.stringValue = [NSString stringWithFormat:@"文件夹识别完成：成功 %lu 个，失败 %lu 个",
+                                                (unsigned long)completed, (unsigned long)failed];
+            }
+        });
+    });
+}
+
+- (int)generateSubtitleFileForVideoPath:(NSString *)videoPath
+                              targetSRT:(NSString *)targetSRT
+                         mediaDuration:(double)mediaDuration
+                                 model:(NSString *)model
+                                ffmpeg:(NSString *)ffmpeg
+                               ffprobe:(NSString *)ffprobe
+                               whisper:(NSString *)whisper {
+    if ([self isSubtitleCancellationRequested]) { return -3; }
+    NSFileManager *fm = [NSFileManager defaultManager];
     NSString *tempRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
     NSString *audioPath = [tempRoot stringByAppendingPathComponent:@"audio.wav"];
     NSString *outputBase = [tempRoot stringByAppendingPathComponent:@"subtitle"];
     NSString *tempSRT = [outputBase stringByAppendingPathExtension:@"srt"];
+    NSError *dirError = nil;
+    [fm createDirectoryAtPath:tempRoot withIntermediateDirectories:YES attributes:nil error:&dirError];
+    if (dirError) { return -1; }
 
-    dispatch_async(self.subtitleQueue, ^{
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSError *dirError = nil;
-        [fm createDirectoryAtPath:tempRoot withIntermediateDirectories:YES attributes:nil error:&dirError];
-        if (dirError) {
-            [self finishSubtitleGenerationWithError:@"创建临时目录失败" tempRoot:tempRoot];
-            return;
-        }
-
-        int audioStatus = [self runTask:ffmpeg arguments:@[@"-hide_banner", @"-loglevel", @"error", @"-y", @"-i", videoPath, @"-vn", @"-ac", @"1", @"-ar", @"16000", @"-c:a", @"pcm_s16le", audioPath]];
-        if (audioStatus != 0) {
-            [self finishSubtitleGenerationWithError:@"抽音频失败" tempRoot:tempRoot];
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.statusLabel.stringValue = @"生成中：识别中英字幕";
-        });
-
-        double audioDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
-        double videoDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
-        double transcriptionDuration = audioDuration > 0 ? audioDuration : MAX(mediaDuration, videoDuration);
-        double timelineOffset = MAX([self firstAudioStreamStartTimeAtPath:videoPath ffprobe:ffprobe], 0.0);
-
-        NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
-        int whisperStatus = [self transcribeAudioAtPath:audioPath
-                                                  model:model
-                                                 ffmpeg:ffmpeg
-                                                whisper:whisper
-                                                 prompt:prompt
-                                             outputBase:outputBase
-                                           mediaDuration:transcriptionDuration
-                                          timelineOffset:timelineOffset];
-        if (whisperStatus == -2) {
-            [self finishSubtitleGenerationWithError:@"没有识别到语音" tempRoot:tempRoot];
-            return;
-        }
-        if (whisperStatus != 0 || ![fm fileExistsAtPath:tempSRT]) {
-            [self finishSubtitleGenerationWithError:@"识别字幕失败" tempRoot:tempRoot];
-            return;
-        }
-
-        [self simplifySubtitleAtPath:tempSRT];
-        [self removeRepeatedSubtitleRunsAtPath:tempSRT];
-
-        [fm removeItemAtPath:targetSRT error:nil];
-        NSError *moveError = nil;
-        [fm moveItemAtPath:tempSRT toPath:targetSRT error:&moveError];
-        if (moveError) {
-            [self finishSubtitleGenerationWithError:@"保存字幕失败" tempRoot:tempRoot];
-            return;
-        }
-
-        [fm removeItemAtPath:tempRoot error:nil];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.subtitleGenerating = NO;
-            self.autoSubtitleButton.enabled = YES;
-            self.statusLabel.stringValue = @"字幕生成完成";
-            [self loadSubtitleAtPath:targetSRT show:YES];
-        });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.statusLabel.stringValue = [NSString stringWithFormat:@"生成中：%@", videoPath.lastPathComponent];
     });
+    int audioStatus = [self runTask:ffmpeg arguments:@[@"-hide_banner", @"-loglevel", @"error", @"-y", @"-i", videoPath, @"-vn", @"-ac", @"1", @"-ar", @"16000", @"-c:a", @"pcm_s16le", audioPath]];
+    if ([self isSubtitleCancellationRequested]) { [fm removeItemAtPath:tempRoot error:nil]; return -3; }
+    if (audioStatus != 0) { [fm removeItemAtPath:tempRoot error:nil]; return -1; }
+
+    double audioDuration = [self mediaDurationAtPath:audioPath ffprobe:ffprobe];
+    double videoDuration = [self mediaDurationAtPath:videoPath ffprobe:ffprobe];
+    double transcriptionDuration = audioDuration > 0 ? audioDuration : MAX(mediaDuration, videoDuration);
+    double timelineOffset = MAX([self firstAudioStreamStartTimeAtPath:videoPath ffprobe:ffprobe], 0.0);
+    NSString *prompt = @"以下是中英混合课程字幕。中文请使用简体中文；英文单词、术语和英文句子请保留英文原文。不要把中文翻译成英文。";
+    int whisperStatus = [self transcribeAudioAtPath:audioPath model:model ffmpeg:ffmpeg whisper:whisper prompt:prompt outputBase:outputBase mediaDuration:transcriptionDuration timelineOffset:timelineOffset];
+    if ([self isSubtitleCancellationRequested]) { [fm removeItemAtPath:tempRoot error:nil]; return -3; }
+    if (whisperStatus != 0 || ![fm fileExistsAtPath:tempSRT]) { [fm removeItemAtPath:tempRoot error:nil]; return whisperStatus == -2 ? -2 : -1; }
+
+    [self simplifySubtitleAtPath:tempSRT];
+    [self removeRepeatedSubtitleRunsAtPath:tempSRT];
+    [fm removeItemAtPath:targetSRT error:nil];
+    NSError *moveError = nil;
+    [fm moveItemAtPath:tempSRT toPath:targetSRT error:&moveError];
+    [fm removeItemAtPath:tempRoot error:nil];
+    return moveError ? -1 : 0;
 }
 
 - (NSString *)findWhisperModel {
@@ -1384,6 +1514,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
               timelineOffset:(double)timelineOffset {
     double chunkSeconds = 300.0;
     double overlapSeconds = 15.0;
+    if ([self isSubtitleCancellationRequested]) { return -3; }
     if (mediaDuration <= chunkSeconds * 2.0) {
         int status = [self runTask:whisper arguments:[self whisperArgumentsWithModel:model
                                                                            audioPath:audioPath
@@ -1391,6 +1522,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                                           outputBase:outputBase
                                                                             offsetMS:0
                                                                           durationMS:0]];
+        if ([self isSubtitleCancellationRequested]) { return -3; }
         if (status != 0) { return status; }
         NSString *srtPath = [outputBase stringByAppendingPathExtension:@"srt"];
         if ([self subtitleFileHasUsableContentAtPath:srtPath] && timelineOffset > 0) {
@@ -1404,6 +1536,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     NSUInteger chunkCount = (NSUInteger)ceil(mediaDuration / chunkSeconds);
     NSMutableArray<NSString *> *chunkSRTs = NSMutableArray.array;
     for (NSUInteger index = 0; index < chunkCount; index++) {
+        if ([self isSubtitleCancellationRequested]) { return -3; }
         double coreStartSeconds = (double)index * chunkSeconds;
         double coreEndSeconds = MIN(coreStartSeconds + chunkSeconds, mediaDuration);
         double offsetSeconds = MAX(coreStartSeconds - overlapSeconds, 0.0);
@@ -1431,6 +1564,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
             @"-c:a", @"pcm_s16le",
             chunkAudio
         ]];
+        if ([self isSubtitleCancellationRequested]) { return -3; }
         if (audioStatus != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:chunkAudio]) {
             return audioStatus == 0 ? -1 : audioStatus;
         }
@@ -1442,6 +1576,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
                                                                             offsetMS:0
                                                                           durationMS:0]];
         NSString *chunkSRT = [chunkBase stringByAppendingPathExtension:@"srt"];
+        if ([self isSubtitleCancellationRequested]) { return -3; }
         if (status != 0) {
             return status;
         }
@@ -1879,12 +2014,24 @@ static void SMPMPVRenderUpdate(void *ctx) {
     NSFileHandle *nullDevice = [NSFileHandle fileHandleWithNullDevice];
     task.standardOutput = nullDevice;
     task.standardError = nullDevice;
+    @synchronized (self) {
+        if (self.subtitleGenerating) {
+            self.activeSubtitleTask = task;
+        }
+    }
     NSError *error = nil;
     if (![task launchAndReturnError:&error]) {
+        @synchronized (self) {
+            if (self.activeSubtitleTask == task) { self.activeSubtitleTask = nil; }
+        }
         return -1;
     }
     [task waitUntilExit];
-    return task.terminationStatus;
+    int status = task.terminationStatus;
+    @synchronized (self) {
+        if (self.activeSubtitleTask == task) { self.activeSubtitleTask = nil; }
+    }
+    return status;
 }
 
 - (void)finishSubtitleGenerationWithError:(NSString *)message tempRoot:(NSString *)tempRoot {
