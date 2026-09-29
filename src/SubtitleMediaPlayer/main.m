@@ -458,7 +458,7 @@ static void SMPMPVRenderUpdate(void *ctx) {
     [controls addSubview:self.playButton];
 
     self.speedPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    for (NSNumber *speed in @[@0.75, @1.0, @1.25, @1.5, @2.0, @3.0, @4.0]) {
+    for (NSNumber *speed in @[@0.75, @1.0, @1.25, @1.5, @2.0, @3.0, @4.0, @6.0]) {
         NSString *title = [NSString stringWithFormat:@"%@x", speed.stringValue];
         [self.speedPopup addItemWithTitle:title];
         self.speedPopup.lastItem.representedObject = speed;
